@@ -1,6 +1,6 @@
 #
 # name - spike_roomba
-# a python script to manage a therapy  dialog with one or mor psychologically 
+# a python script to manage a therapy dialog with one or more psychologically 
 # damaged roombas 
 #
 #  being used to explore that possibiliites, and learn some python
