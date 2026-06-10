@@ -80,7 +80,7 @@ def therapy_message(request: TherapyMessageRequest):
         "content": request.message
     })
 
-    print (f"--- session --- {session}")
+    # print (f"--- session --- {session}")
 
     message = client.messages.create(
         model="claude-sonnet-4-5",
@@ -107,7 +107,7 @@ def therapy_message(request: TherapyMessageRequest):
 
     session['conversation_history'].append({
         "role": "assistant",
-        "content": response_text
+        "content": dialog
     })
 
     return TherapyMessageResponse(
