@@ -14,6 +14,35 @@ client = anthropic.Anthropic()
 
 sessions = {}
 
+EVENT_PROSE_PREAMBLE_TEMPLATES = {
+    "enter": "{roomba_name} rolls into the arena",
+    "proximity_threshold": "{roomba_name} senses something",
+    "collision": "{roomba_name} bumps into something",
+    "boundary_encountered": "{roomba_name} runs into a wall"
+}
+ 
+EVENT_PROSE_EMOTION_TEMPLATES = {
+    "enter": " already aware of the {entity_type}, feeling {emotion}",
+    "proximity_threshold": " intuiting the {entity_type} after getting closer and feeling {emotion}",
+    "collision": " hitting the {entity_type} and reacting with {emotion}",
+    "boundary_encountered": " near the {entity_type}, feeling {emotion}"
+}
+
+EVENT_TYPES_REQUIRING_ENTITY = {"proximity_threshold", "collision"}
+
+def render_event_prose(event_type, roomba_name, emotion_states):
+    if not emotion_states and event_type in EVENT_TYPES_REQUIRING_ENTITY:
+        raise ValueError(f"emotion_states cannot be empty for event type '{event_type}'")
+
+    preamble_template = EVENT_PROSE_PREAMBLE_TEMPLATES[event_type]
+    preamble = preamble_template.format(roomba_name=roomba_name)
+    template = EVENT_PROSE_EMOTION_TEMPLATES[event_type]
+    sentences = [
+        template.format(entity_type=es.entity_type, emotion=es.emotion)
+        for es in emotion_states
+    ]
+    return preamble+(", and".join(sentences))+"."
+
 def load_personality(filename, personality_id):
     with open(filename, 'r') as fileloader:
         personality_data = json.load(fileloader)
@@ -225,7 +254,7 @@ def arena_event( request: ArenaEventRequest):
     if session is None:
         raise HTTPException(status_code = 404, detail = f"Session {request.session_id} not found")
     # Stub: prose rendering and LLM call not yet implemented
-    #Aggregation is simple replacement for now - the newest reported strength/emotion
+    # Aggregation is simple replacement for now - the newest reported strength/emotion
     # for a given entity_type overwrites whatever was there. Revisit once there's a
     # running game to observe real aggregation needs against (see BACKLOG.md). 
 
@@ -242,9 +271,20 @@ def arena_event( request: ArenaEventRequest):
                 "emotion": es.emotion,
                 "strength": 0.0
             })
+    
+    # Stub: LLM call not yet implemented (step 8). PAD stays hardcoded at zero
+    # until then - only the dialog is real (placeholder-template) prose now.
+    try:
+        dialog = render_event_prose(
+            request.event_type, 
+            session['personality']['name'],
+            request.emotion_states
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
     return ArenaEventResponse(
-        dialog="[stub] arena event received, business logic not implemented",
+        dialog=dialog,
         pad = PADState( pleasure= 0.0, arousal= 0.0, dominance= 0.0),
         entity_sensitivities= [EntitySensitivity(**s) for s in session['entity_sensitivities']]
 
