@@ -51,6 +51,31 @@ def load_personality(filename, personality_id):
             return personality
     raise ValueError(f"Personality '{personality_id}' not found in {filename}")
 
+def call_llm(system_prompt, converstion_history):
+    message = client.messages.create(
+        model = 'claude-sonnet-4-5', 
+        max_tokens=1024, 
+        system= system_prompt, 
+        messages= converstion_history
+    )
+
+    response_text = message.content[0].text
+
+    cleaned = response_text.strip().strip('`').strip()
+    if cleaned.startswith('json'):
+        cleaned = cleaned[4:]
+    
+    try:
+        response_data = json.loads(cleaned)
+        dialog = response_data['dialog']
+        pad= PADState(**response_data['pad'])
+    except:
+        dialog = response_text
+        pad = PADState( pleasure = 0.0, arousal = 0.0, dominance = 0.0)
+        print(f"[debug] JSON parse failed, raw response: {repr(response_text)}")
+
+    return dialog, pad
+
 class Entity(BaseModel):
     entity_id: str
     entity_type: str
@@ -172,30 +197,7 @@ def therapy_message(request: TherapyMessageRequest):
         "content": request.message
     })
 
-    # print (f"--- session --- {session}")
-
-    message = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=1024,
-        system=session['personality']['system_prompt'],
-        messages=session['conversation_history']
-    )
-
-    response_text = message.content[0].text
-    print(f"[debug] raw response: {repr(response_text)}")
-
-    cleaned = response_text.strip().strip('`').strip()
-    if cleaned.startswith('json'):
-        cleaned = cleaned[4:]
-
-    try:
-        response_data = json.loads(cleaned)
-        dialog = response_data['dialog']
-        pad = PADState(**response_data['pad'])
-    except (json.JSONDecodeError, KeyError, TypeError):
-        dialog = response_text
-        pad = PADState(pleasure=0.0, arousal=0.0, dominance=0.0)
-        print(f"[debug] JSON parse failed, raw response: {repr(response_text)}")
+    dialog, pad = call_llm(session['personality']['system_prompt'], session['conversation_history'])
 
     session['conversation_history'].append({
         "role": "assistant",
@@ -272,10 +274,11 @@ def arena_event( request: ArenaEventRequest):
                 "strength": 0.0
             })
     
-    # Stub: LLM call not yet implemented (step 8). PAD stays hardcoded at zero
-    # until then - only the dialog is real (placeholder-template) prose now.
+    # Stub: note - this is now the real payt - rendered event prose becomes
+    # a user-role turn in the session's shared conversation_history ( the same
+    # conversation_history that therapy uses ), and the LLM responds in character as it does there.
     try:
-        dialog = render_event_prose(
+        event_prose = render_event_prose(
             request.event_type, 
             session['personality']['name'],
             request.emotion_states
@@ -283,9 +286,23 @@ def arena_event( request: ArenaEventRequest):
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
+    session['conversation_history'].append({
+        "role": "user",
+        "content": event_prose
+    })
+
+    dialog, pad = call_llm(session['personality']['system_prompt'], session['conversation_history'])
+
+    session['conversation_history'].append({
+        "role": "assistant",
+        "content": dialog
+    })
+
+    session['pad'] = pad
+
     return ArenaEventResponse(
         dialog=dialog,
-        pad = PADState( pleasure= 0.0, arousal= 0.0, dominance= 0.0),
+        pad = pad,
         entity_sensitivities= [EntitySensitivity(**s) for s in session['entity_sensitivities']]
 
     )

@@ -106,3 +106,16 @@ because it's a reasonable place to "prime the pump," per discussion, but not
 treated as finalized.
 
 Source: same as #8.
+
+## 10. `/arena/event`: empty `emotion_states` list is silently permitted
+
+`ArenaEventRequest.emotion_states` is validated as `List[EmotionState]` with no
+minimum-length constraint, so an empty list (`[]`) is currently accepted. 
+This is only realy valid for "enter" and"boundary_colision".  This
+produces an empty-string `dialog` from `render_event_prose` rather than a clear
+error. Every event type we've defined so far implies at least one triggering
+entity, so an empty list arguably indicates a malformed request from Unity.
+Consider adding a minimum-length validation (reject with 422) once real
+gameplay traffic exists to confirm this assumption holds.
+
+Source: step 7 (placeholder prose rendering).
