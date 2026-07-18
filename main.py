@@ -152,7 +152,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         response_data = json.loads(cleaned)
         dialog = response_data['dialog']
         pad= PADState(**response_data['pad'])
-    except:
+    except (json.JSONDecodeError, KeyError, TypeError):
         dialog = response_text
         pad = PADState( pleasure = 0.0, arousal = 0.0, dominance = 0.0)
         logger.warning(f"JSON parse failed for dialog/pad, raw response: {response_text!r}")
@@ -162,7 +162,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         entity_sensitivity_updates = [
             EntitySensitivity(**s) for s in response_data.get('entity_sensitivities',[])
         ]
-    except:
+    except (TypeError, ValueError):
         entity_sensitivity_updates = []
         logger.warning(f"entity_sensitivities parse failed, raw: {response_data.get('entity_sensitivities')!r}")
 
@@ -191,6 +191,7 @@ class StartSessionResponse( BaseModel ):
     roomba_name:str
     roomba_description:str
     initial_pad: PADState
+    entity_sensitivities: List[EntitySensitivity]
 
 class TherapyMessageRequest(BaseModel):
     session_id: str
@@ -274,7 +275,8 @@ def start_session(request: StartSessionRequest):
         session_id = session_id, 
         roomba_name = personality['name'], 
         roomba_description = personality['description'],
-        initial_pad = initial_pad
+        initial_pad = initial_pad,
+        entity_sensitivities = [EntitySensitivity(**s) for s in entity_sensitivities]
     )
 
 @app.post("/therapy/message", response_model=TherapyMessageResponse, description="The therapist speaks. The response updates the Roomba's state")
@@ -312,7 +314,6 @@ def therapy_message(request: TherapyMessageRequest):
 
 @app.get("/session/state", response_model=SessionStateResponse,  description="synchronous retrieval of important session state details.")
 def session_state(session_id:str):
-    print (f"--- session_id --- {session_id}")
     session = sessions.get(session_id)
 
     if session is None:
@@ -336,7 +337,7 @@ def arena_entity(request: ArenaEntityRequest):
     
     if request.action == "added":
         new_entity = request.entity.dict()
-        new_entity['emotion'] = "neutral"
+        new_entity['emotion'] = "none"
         new_entity['strength'] = 0.0
         session['known_entities'].append(new_entity)
     elif request.action == "removed":

@@ -32,6 +32,12 @@ Worth deciding whether this should instead be a genuinely separate endpoint
 rather than one endpoint with two response shapes.
 
 Source: same as #1.
+
+**Status update:** `/arena/entity` is now marked `deprecated` in Swagger — its
+capabilities were superseded by `/arena/event` + `entity_sensitivities` (see #7
+below). Items #4-#6 are now low priority unless the endpoint gets revived for
+a real purpose.
+
 ## 4. `/arena/entity`: dedup check on `action: "added"`
 
 Currently `"added"` always appends to `known_entities`, even if that `entity_id`
@@ -59,7 +65,16 @@ significantly with what `/session/state` already exposes. Low priority /
 possibly not worth building.
 
 Source: same as #4.
-## 7. Arena entity list: global vs. per-session "known" list
+
+## 7. Arena entity list: global vs. per-session "known" list — RESOLVED/SUPERSEDED
+
+**This is resolved by the entity_sensitivities redesign.** `known_entities`
+is now write-only (populated by the now-deprecated `/arena/entity`, but not
+read by anything). The real per-session mechanism is `entity_sensitivities`,
+aggregated by `entity_type` from Unity's `emotion_states` and the LLM's own
+reported deltas — which sidesteps the global-vs-per-session question this
+item raised, since it was never trying to track entity *instances* at all,
+only type-level feelings. Keeping the original text below for the record.
 
 `known_entities` is currently modeled as purely per-session state, populated by
 `arena_manifest` at `/session/start` and mutated by `/arena/entity` calls scoped
@@ -105,9 +120,18 @@ personality dysfunctions rather than blank zeros), is unresolved. Left in for no
 because it's a reasonable place to "prime the pump," per discussion, but not
 treated as finalized.
 
+**Status update:** the "prime from dysfunctions" idea was implemented, but as
+a *separate* mechanism — `personalities.json`'s new `initial_entity_sensitivities`
+field, applied before `arena_manifest` at `/session/start`, taking precedence
+for any entity_type it covers. `arena_manifest`'s own role is now narrower and
+clearer: it only zero-seeds entity types that `initial_entity_sensitivities`
+doesn't already cover. Still not fully "finalized" in the sense of being a
+deliberate long-term design, but the ambiguity this item originally flagged
+is mostly resolved.
+
 Source: same as #8.
 
-## 10. `/arena/event`: empty `emotion_states` list is silently permitted
++## 10. `/arena/event`: empty `emotion_states` list is silently permitted — RESOLVED
 
 `ArenaEventRequest.emotion_states` is validated as `List[EmotionState]` with no
 minimum-length constraint, so an empty list (`[]`) is currently accepted. 
@@ -118,4 +142,74 @@ entity, so an empty list arguably indicates a malformed request from Unity.
 Consider adding a minimum-length validation (reject with 422) once real
 gameplay traffic exists to confirm this assumption holds.
 
+**Resolved:** `render_event_prose` now raises `ValueError` (surfaced as a 422)
+when `emotion_states` is empty for `proximity_threshold` or `collision` —
+event types where your own semantic model says an entity is required. `enter`
+and `boundary_encountered` are allowed to have empty `emotion_states` (arena
+entry with nobody around, or hitting a wall not near anything), and render a
+sensible standalone sentence via the preamble/emotion-clause template split.
+
 Source: step 7 (placeholder prose rendering).
+
+## 11. No canonical `entity_type`/`emotion` vocabulary
+
+Unity, the LLM, and `personalities.json` each independently choose free-form
+strings for `entity_type` (e.g. "couch" vs "Couch" vs "sofa") and `emotion`.
+`entity_sensitivities` aggregation is keyed on exact string match, so a casing
+or synonym mismatch between Unity's report and the LLM's delta would silently
+create a duplicate, disconnected entry instead of updating the intended one.
+Not yet an issue with a single manual tester controlling both "sides," but
+likely the first real bug once there's an actual Unity client generating its
+own strings independently. Worth promoting ahead of #12-#14 below once Unity
+integration starts.
+
+Source: post-testing review, deferred pending Unity integration.
+
+## 12. Endpoint-by-endpoint error handling review
+
+The LLM-call-specific error handling (network/API failures in `call_llm`) is
+done. What's not done: a deliberate pass across every endpoint considering its
+actual failure modes, rather than whatever error handling fell out incidentally
+while building each feature (some 404s, one 422). Deferred - large scope.
+
+Source: post-testing review.
+
+## 13. Automated tests for merge/aggregation logic
+
+No automated tests exist; Swagger-only manual testing has been an explicit,
+reasoned choice so far. Worth reconsidering now that the entity_sensitivities
+merge logic has real branching complexity (seed-at-zero vs. actual-value,
+Unity-then-LLM ordering, empty-list validation per event type) - exactly the
+kind of logic that's easy to silently break with a future "small" change and
+hard to catch by manual testing alone. Deferred - large scope.
+
+Source: post-testing review.
+
+## 14. Session persistence and concurrency
+
+No database, no locking; sessions live in an in-memory dict for the lifetime
+of the process. Known and previously accepted as out of scope (no multi-session
+need yet, single manual tester). Deferred - large scope.
+
+Source: post-testing review.
+
+## 15. Verify `anthropic.APIError` actually covers real failure modes
+
+`call_llm`'s `except anthropic.APIError as e:` is assumed to be the SDK's base
+exception class covering connection failures, timeouts, rate limits, and bad
+status responses - based on general understanding of the SDK's exception
+hierarchy, not confirmed against the actually-installed package version.
+Worth deliberately triggering a failure (e.g. a temporarily broken API key) to
+confirm the 502 path actually fires as intended, rather than trusting it untested.
+
+Source: step 11 (LLM call error handling).
+
+## 16. `HTTPException` detail message inconsistency across endpoints
+
+Quoting and capitalization of `session_id`/entity error details drifted across
+endpoints during iteration (e.g. `"Session '{id}' not found"` vs.
+`"Session {id} not found"` vs. `"session '{id}' not found"`). Cosmetic, not
+functional, but worth a consistency pass before treating error responses as
+a stable part of the contract.
+
+Source: noticed during branch sync, iteration 2.
