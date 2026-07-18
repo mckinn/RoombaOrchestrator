@@ -1,12 +1,26 @@
 import json
 import anthropic
+import logging
 from typing import Optional, List, Literal 
 from fastapi import FastAPI, HTTPException
 from fastapi.params import Body
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv() 
+
+import os
+
+base_log_level_name = os.getenv("BASE_LOG_LEVEL", "INFO").upper() 
+base_log_level = getattr(logging, base_log_level_name, logging.INFO)
+logging.basicConfig(level=base_log_level, format="%(asctime)s [%(levelname)s] %(message)s")
+
+log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_name, logging.INFO)
+print(f"Log Level Names are... {log_level_name}, {base_log_level_name}")
+
+logger = logging.getLogger("roomba_orchestrator")
+logger.setLevel(log_level)
 
 app = FastAPI()
 
@@ -41,7 +55,6 @@ def render_event_prose(event_type, roomba_name, emotion_states):
         template.format(entity_type=es.entity_type, emotion=es.emotion)
         for es in emotion_states
     ]
-    print(f"[debug] ---render event prose --- {preamble}+{", and".join(sentences)}.")
     return preamble+(", and".join(sentences))+"."
 
 def load_personality(filename, personality_id):
@@ -52,7 +65,24 @@ def load_personality(filename, personality_id):
             return personality
     raise ValueError(f"Personality '{personality_id}' not found in {filename}")
 
-def build_state_context( pad, entity_sensitivities):
+RESPONSE_FORMAT_INSTRUCTIONS = """Always respond with only a single JSON object, and no text before or after it, matching this exact structure:
+
+{"dialog": "what you say out loud, in character", "pad": {"pleasure": 0.3, "arousal": -0.2, "dominance": 0.1}, "entity_sensitivities": [{"entity_type": "couch", "emotion": "fear", "strength": 0.8}]}
+
+"dialog" is a string: what you say out loud, in character, based on everything that has happened so far.
+
+"pad" describes your current emotional state as three numbers - actual numbers like 0.3 or -0.7, never as strings - each between -1.0 and 1.0:
+- pleasure: how good or bad you feel. Negative is distressed, positive is content.
+- arousal: how activated or calm you feel. Negative is sluggish or frozen, positive is agitated or hyperactive.
+- dominance: how in control or overwhelmed you feel. Negative is helpless, positive is in charge of the situation.
+Set all three to reflect your current emotional state precisely, not just broad categories.
+
+"entity_sensitivities" is a list, and can be empty ([]) or omitted entirely if nothing has changed. Only include entries for entity types where your feelings have genuinely changed as a result of this exchange. Each entry has:
+- entity_type: the kind of thing, e.g. "couch"
+- emotion: the emotion you feel toward it, e.g. "fear"
+- strength: a number - not a string - between 0.0 and 1.0 for how strong that feeling is"""
+
+def build_current_state_context(pad, entity_sensitivities):
     sensitivities_text = ", ".join(
         f"{s['entity_type']}: {s['emotion']} (strength {s['strength']})"
         for s in entity_sensitivities
@@ -62,14 +92,7 @@ def build_state_context( pad, entity_sensitivities):
         f"\n\nYour current internal state, for your own awareness only - "
         f"never state these numbers aloud, only let them inform your tone:\n"
         f"PAD: pleasure={pad.pleasure}, arousal={pad.arousal}, dominance={pad.dominance}\n"
-        f"Known feelings toward entity types: {sensitivities_text}\n\n"
-        f"If, and only if, your feelings about one or more entity types have "
-        f"genuinely changed as a result of this exchange, include an "
-        f"'entity_sensitivities' list in your JSON response containing just "
-        f"those changed types, e.g. "
-        f'\'"entity_sensitivities": [{{"entity_type": "couch", "emotion": "fear", "strength": 0.2}}]\'. '
-        f"This can be a subset of your known feelings, all of them, or an empty "
-        f"list/omitted entirely if nothing has changed."
+        f"Known feelings toward entity types: {sensitivities_text}"
     )
 
 def merge_entity_sensitivities(session, updates, seed_new_at_zero = False):
@@ -95,18 +118,31 @@ def merge_entity_sensitivities(session, updates, seed_new_at_zero = False):
                 "strength": u.strength
             })
 
-def call_llm(system_prompt, converstion_history, current_pad, current_entity_sensitivities):
-    full_system_prompt = system_prompt + build_state_context(current_pad, current_entity_sensitivities)
-    message = client.messages.create(
-        model = 'claude-sonnet-4-5', 
-        max_tokens=1024, 
-        system= full_system_prompt, 
-        messages= converstion_history
+def call_llm(system_prompt, conversation_history, current_pad, current_entity_sensitivities):
+    full_system_prompt = (
+        system_prompt
+        + "\n\n" + RESPONSE_FORMAT_INSTRUCTIONS
+        + build_current_state_context(current_pad, current_entity_sensitivities)
     )
-    print(f"[debug] --- full system prompt: {full_system_prompt}")
-    print( f"[debug] the message to the LLM is:", message)
+
+    outgoing_turn = conversation_history[-1] if conversation_history else None
+    logger.debug(f"LLM call - sending: {outgoing_turn!r}")
+    logger.debug(f"LLM call - current_pad: {current_pad!r}")
+    logger.debug(f"LLM call - current_entity_sensitivities: {current_entity_sensitivities!r}")
+
+    try:
+        message = client.messages.create(
+            model = 'claude-sonnet-4-5', 
+            max_tokens=1024, 
+            system= full_system_prompt, 
+            messages= conversation_history
+        )
+    except anthropic.APIError as e:
+        logger.error(f"Anthropic API call failed: {e}")
+        raise HTTPException(status_code=502, detail="LLM call failed, please try again")
 
     response_text = message.content[0].text
+    logger.debug(f"LLM call - received {response_text!r}")
 
     cleaned = response_text.strip().strip('`').strip()
     if cleaned.startswith('json'):
@@ -119,7 +155,7 @@ def call_llm(system_prompt, converstion_history, current_pad, current_entity_sen
     except:
         dialog = response_text
         pad = PADState( pleasure = 0.0, arousal = 0.0, dominance = 0.0)
-        print(f"[debug] JSON parse failed, raw response: {repr(response_text)}")
+        logger.warning(f"JSON parse failed for dialog/pad, raw response: {response_text!r}")
         return dialog, pad, []
 
     try:
@@ -128,7 +164,7 @@ def call_llm(system_prompt, converstion_history, current_pad, current_entity_sen
         ]
     except:
         entity_sensitivity_updates = []
-        print(f"[debug] entity_sensitivities parse failed, raw:{repr(response_data.get('entity_sensitivities'))}")
+        logger.warning(f"entity_sensitivities parse failed, raw: {response_data.get('entity_sensitivities')!r}")
 
     return dialog, pad, entity_sensitivity_updates
 
