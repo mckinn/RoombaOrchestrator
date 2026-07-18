@@ -41,6 +41,7 @@ def render_event_prose(event_type, roomba_name, emotion_states):
         template.format(entity_type=es.entity_type, emotion=es.emotion)
         for es in emotion_states
     ]
+    print(f"[debug] ---render event prose --- {preamble}+{", and".join(sentences)}.")
     return preamble+(", and".join(sentences))+"."
 
 def load_personality(filename, personality_id):
@@ -51,13 +52,59 @@ def load_personality(filename, personality_id):
             return personality
     raise ValueError(f"Personality '{personality_id}' not found in {filename}")
 
-def call_llm(system_prompt, converstion_history):
+def build_state_context( pad, entity_sensitivities):
+    sensitivities_text = ", ".join(
+        f"{s['entity_type']}: {s['emotion']} (strength {s['strength']})"
+        for s in entity_sensitivities
+    ) or "none yet"
+
+    return (
+        f"\n\nYour current internal state, for your own awareness only - "
+        f"never state these numbers aloud, only let them inform your tone:\n"
+        f"PAD: pleasure={pad.pleasure}, arousal={pad.arousal}, dominance={pad.dominance}\n"
+        f"Known feelings toward entity types: {sensitivities_text}\n\n"
+        f"If, and only if, your feelings about one or more entity types have "
+        f"genuinely changed as a result of this exchange, include an "
+        f"'entity_sensitivities' list in your JSON response containing just "
+        f"those changed types, e.g. "
+        f'\'"entity_sensitivities": [{{"entity_type": "couch", "emotion": "fear", "strength": 0.2}}]\'. '
+        f"This can be a subset of your known feelings, all of them, or an empty "
+        f"list/omitted entirely if nothing has changed."
+    )
+
+def merge_entity_sensitivities(session, updates, seed_new_at_zero = False):
+    for u in updates:
+        target = next(
+            (s for s in session['entity_sensitivities'] if s['entity_type'] == u.entity_type),
+            None
+        )
+        if target is not None:     #override with update
+            target['emotion'] = u.emotion
+            target['strength'] = u.strength
+        
+        elif seed_new_at_zero: #create a new 0 value entity sensitivity
+            session['entity_sensitivities'].append({
+                "entity_type": u.entity_type, 
+                "emotion": "none",
+                "strength": 0.0
+            })
+        else:
+            session['entity_sensitivities'].append({ # add a new updated values entry
+                "entity_type": u.entity_type, 
+                "emotion": u.emotion,
+                "strength": u.strength
+            })
+
+def call_llm(system_prompt, converstion_history, current_pad, current_entity_sensitivities):
+    full_system_prompt = system_prompt + build_state_context(current_pad, current_entity_sensitivities)
     message = client.messages.create(
         model = 'claude-sonnet-4-5', 
         max_tokens=1024, 
-        system= system_prompt, 
+        system= full_system_prompt, 
         messages= converstion_history
     )
+    print(f"[debug] --- full system prompt: {full_system_prompt}")
+    print( f"[debug] the message to the LLM is:", message)
 
     response_text = message.content[0].text
 
@@ -73,8 +120,17 @@ def call_llm(system_prompt, converstion_history):
         dialog = response_text
         pad = PADState( pleasure = 0.0, arousal = 0.0, dominance = 0.0)
         print(f"[debug] JSON parse failed, raw response: {repr(response_text)}")
+        return dialog, pad, []
 
-    return dialog, pad
+    try:
+        entity_sensitivity_updates = [
+            EntitySensitivity(**s) for s in response_data.get('entity_sensitivities',[])
+        ]
+    except:
+        entity_sensitivity_updates = []
+        print(f"[debug] entity_sensitivities parse failed, raw:{repr(response_data.get('entity_sensitivities'))}")
+
+    return dialog, pad, entity_sensitivity_updates
 
 class Entity(BaseModel):
     entity_id: str
@@ -163,8 +219,8 @@ def start_session(request: StartSessionRequest):
     session_id = f"session_{len(sessions) + 1}"
     initial_pad = PADState(pleasure=0.0, arousal=0.0, dominance=0.0)
 
-    entity_sensitivities = []
-    seen_types =  set()
+    entity_sensitivities = [dict(s) for s in personality.get('initial_entity_sensitivities', [])]
+    seen_types =  {s['entity_type'] for s in entity_sensitivities}
     for e in (request.arena_manifest or []):
         if e.entity_type not in seen_types:
             seen_types.add(e.entity_type)
@@ -197,7 +253,12 @@ def therapy_message(request: TherapyMessageRequest):
         "content": request.message
     })
 
-    dialog, pad = call_llm(session['personality']['system_prompt'], session['conversation_history'])
+    dialog, pad, entity_sensitivity_updates = call_llm(
+        session['personality']['system_prompt'], 
+        session['conversation_history'],
+        session['pad'],
+        session['entity_sensitivities']
+        )
 
     session['conversation_history'].append({
         "role": "assistant",
@@ -205,6 +266,7 @@ def therapy_message(request: TherapyMessageRequest):
     })
 
     session['pad']=pad
+    merge_entity_sensitivities(session, entity_sensitivity_updates)
 
     return TherapyMessageResponse(
         dialog=dialog,
@@ -260,23 +322,18 @@ def arena_event( request: ArenaEventRequest):
     # for a given entity_type overwrites whatever was there. Revisit once there's a
     # running game to observe real aggregation needs against (see BACKLOG.md). 
 
-    for es in request.emotion_states:
-        target = next (
-            (s for s in session['entity_sensitivities'] if s['entity_type'] == es.entity_type), None
-        )
-        if target is not None:
-            target['emotion'] = es.emotion
-            target['strength'] = es.strength
-        else:
-            session['entity_sensitivities'].append({
-                "entity_type" : es.entity_type,
-                "emotion": es.emotion,
-                "strength": 0.0
-            })
+    # Snapshot Dusty's established feelings BEFORE Unity's report overwrites anything -
+    # this is what gets shown to the LLM as context, so it has a real prior state to
+    # reconcile against event_prose's (possibly naive/physics-only) narration.
+    prior_entity_sensitivities = [dict(s) for s in session['entity_sensitivities']]
+
+    # Aggregation is simple replacement for now - the newest reported strength/emotion
+    # for a given entity_type overwrites whatever was there. Revisit once there's a
+    # running game to observe real aggregation needs against (see BACKLOG.md).
+    # New entity_types discovered here seed at zero, per the original decision -
+    # a raw physics reading on first contact isn't a narratively meaningful value.
+    merge_entity_sensitivities(session, request.emotion_states, seed_new_at_zero=True)
     
-    # Stub: note - this is now the real payt - rendered event prose becomes
-    # a user-role turn in the session's shared conversation_history ( the same
-    # conversation_history that therapy uses ), and the LLM responds in character as it does there.
     try:
         event_prose = render_event_prose(
             request.event_type, 
@@ -291,7 +348,12 @@ def arena_event( request: ArenaEventRequest):
         "content": event_prose
     })
 
-    dialog, pad = call_llm(session['personality']['system_prompt'], session['conversation_history'])
+    dialog, pad, entity_sensitivity_updates = call_llm(
+        session['personality']['system_prompt'],
+        session['conversation_history'],
+        session['pad'],
+        prior_entity_sensitivities
+    )
 
     session['conversation_history'].append({
         "role": "assistant",
@@ -299,12 +361,16 @@ def arena_event( request: ArenaEventRequest):
     })
 
     session['pad'] = pad
+    # LLM's read is applied after Unity's - the LLM has final say per entity_type
+    # when it chooses to weigh in, since it has context Unity's physics loop doesn't.
+    # New types the LLM introduces (not seen in Unity's report at all) keep their
+    # actual stated value - a deliberate narrative report, unlike Unity's raw contact.
+    merge_entity_sensitivities(session, entity_sensitivity_updates)
 
     return ArenaEventResponse(
         dialog=dialog,
         pad = pad,
         entity_sensitivities= [EntitySensitivity(**s) for s in session['entity_sensitivities']]
-
     )
 
 @app.post("/session/end", response_model=EndSessionResponse, description="end a specific session")
