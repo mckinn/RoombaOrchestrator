@@ -141,8 +141,11 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         logger.error(f"Anthropic API call failed: {e}")
         raise HTTPException(status_code=502, detail="LLM call failed, please try again")
     
-    logger.debug(f"LLM call - received {message.content!r}")
-    response_text = message.content[0].text
+    try:
+        response_text = message.content[0].text
+    except:
+        raise HTTPException(status_code=500, detail=f"LLM response malformed {message.content!r}")
+    
     logger.debug(f"LLM call - received {response_text!r}")
 
     cleaned = response_text.strip().strip('`').strip()
@@ -193,6 +196,7 @@ class StartSessionResponse( BaseModel ):
     roomba_description:str
     initial_pad: PADState
     entity_sensitivities: List[EntitySensitivity]
+    known_entities: list
 
 class TherapyMessageRequest(BaseModel):
     session_id: str
@@ -277,7 +281,8 @@ def start_session(request: StartSessionRequest):
         roomba_name = personality['name'], 
         roomba_description = personality['description'],
         initial_pad = initial_pad,
-        entity_sensitivities = [EntitySensitivity(**s) for s in entity_sensitivities]
+        entity_sensitivities = [EntitySensitivity(**s) for s in entity_sensitivities],
+        known_entities = sessions[session_id]["known_entities"]
     )
 
 @app.post("/therapy/message", response_model=TherapyMessageResponse, description="The therapist speaks. The response updates the Roomba's state")
