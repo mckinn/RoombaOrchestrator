@@ -141,6 +141,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         logger.error(f"Anthropic API call failed: {e}")
         raise HTTPException(status_code=502, detail="LLM call failed, please try again")
 
+        # This comment is meant to possibly trigger a merge conflict
     response_text = message.content[0].text
     logger.debug(f"LLM call - received {response_text!r}")
 
