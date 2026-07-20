@@ -1,6 +1,11 @@
 # RoombaOrchestrator
 This is the python service that intermediates the Roomba Game implemented in Unity, and the LLM that controls the Roombas
 
+# Required modules & their install commands
+
+Uvicorn - pip install uvicorn
+fastapi - pip install fastapi
+
 # how to use
 
 1. Uvicorn will run on http://127.0.0.1:8000 
