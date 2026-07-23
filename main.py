@@ -89,7 +89,7 @@ def build_current_state_context(pad, entity_sensitivities):
     ) or "none yet"
 
     return (
-        f"\n\nYour current internal state, for your own awareness only - "
+        f"Your current internal state, for your own awareness only - "
         f"never state these numbers aloud, only let them inform your tone:\n"
         f"PAD: pleasure={pad.pleasure}, arousal={pad.arousal}, dominance={pad.dominance}\n"
         f"Known feelings toward entity types: {sensitivities_text}"
@@ -122,7 +122,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
     full_system_prompt = (
         system_prompt
         + "\n\n" + RESPONSE_FORMAT_INSTRUCTIONS
-        + build_current_state_context(current_pad, current_entity_sensitivities)
+        + "\n\n" + build_current_state_context(current_pad, current_entity_sensitivities)
     )
 
     outgoing_turn = conversation_history[-1] if conversation_history else None
@@ -181,7 +181,7 @@ class PADState(BaseModel):
     arousal: float
     dominance: float
 
-class EntitySensitivity( BaseModel ): #different semantics that emotion, but same fields
+class EntitySensitivity( BaseModel ): #different semantics than emotion, but same fields
     entity_type: str
     emotion: str
     strength: float
@@ -272,7 +272,7 @@ def start_session(request: StartSessionRequest):
         "personality":personality, # the system field in the message.
         "conversation_history":[],
         "pad": initial_pad,
-        "known_entities": [e.dict() for e in request.arena_manifest] if request.arena_manifest else [],
+        "known_entities": [dict(e) for e in request.arena_manifest] if request.arena_manifest else [],
         "entity_sensitivities": entity_sensitivities 
     }
 
@@ -342,7 +342,7 @@ def arena_entity(request: ArenaEntityRequest):
         raise HTTPException(status_code=404, detail=f"session '{request.session_id}' not found")
     
     if request.action == "added":
-        new_entity = request.entity.dict()
+        new_entity = request.entity.model_dump()        # model_dump is a dict replacement
         new_entity['emotion'] = "none"
         new_entity['strength'] = 0.0
         session['known_entities'].append(new_entity)
@@ -361,9 +361,6 @@ def arena_event( request: ArenaEventRequest):
     if session is None:
         raise HTTPException(status_code = 404, detail = f"Session {request.session_id} not found")
     # Stub: prose rendering and LLM call not yet implemented
-    # Aggregation is simple replacement for now - the newest reported strength/emotion
-    # for a given entity_type overwrites whatever was there. Revisit once there's a
-    # running game to observe real aggregation needs against (see BACKLOG.md). 
 
     # Snapshot Dusty's established feelings BEFORE Unity's report overwrites anything -
     # this is what gets shown to the LLM as context, so it has a real prior state to
