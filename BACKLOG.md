@@ -213,3 +213,28 @@ functional, but worth a consistency pass before treating error responses as
 a stable part of the contract.
 
 Source: noticed during branch sync, iteration 2.
+
+## 17. Document methods in main.py
+
+Pick and use a template to use to document all methods and main components of main.py.
+Cover summary, intent, parameters, results and any other key factors.
+
+Source: noticed during PR
+
+## 18. Extract `ROOMBA_STATE_TOOL` (and related LLM-response constants) into their own module
+
+`ROOMBA_STATE_TOOL` (the tool-use schema replacing `RESPONSE_FORMAT_INSTRUCTIONS`,
+introduced when `call_llm` moved to forced tool-use structured output) is a large
+inline constant sitting in the middle of `main.py`'s logic. Left inline for now,
+consistent with how `RESPONSE_FORMAT_INSTRUCTIONS` was already inline before it,
+and because it's tightly coupled to `PADState`/`EntitySensitivity` and the parsing
+code right below it - splitting it out in isolation risks the two drifting out of
+sync across files without a compensating benefit.
+
+Worth revisiting as part of a deliberate, broader reorganization of `main.py`
+(e.g. splitting models into `models.py`, endpoints into `routes.py`, LLM-calling
+logic including this tool schema into its own module) once the file has grown
+enough that such a split is clearly justified on its own merits - not as a
+one-off extraction of a single constant.
+
+Source: raised while reviewing the tool-use structured-output patch.

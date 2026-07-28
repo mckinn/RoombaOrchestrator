@@ -151,12 +151,33 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
     cleaned = response_text.strip().strip('`').strip()
     if cleaned.startswith('json'):
         cleaned = cleaned[4:]
+
+    response_data = None
     
     try:
         response_data = json.loads(cleaned)
-        dialog = response_data['dialog']
-        pad= PADState(**response_data['pad'])
-    except (json.JSONDecodeError, KeyError, TypeError):
+    except json.JSONDecodeError:
+        # Model sometimes duplicates its answer: full prose dialog, then a
+        # blank line, then the correctly-formatted JSON object (seen in
+        # practice - not a malformed-JSON case, just stray text around a
+        # valid object). Try to recover by locating the outermost {...}
+        # span and parsing just that substring before giving up entirely.
+        start = cleaned.find('{')
+        end = cleaned.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            try:
+                response_data = json.loads(cleaned[start:end + 1])
+            except json.JSONDecodeError:
+                response_data = None
+
+    if response_data is not None:
+        try:
+            dialog = response_data['dialog']
+            pad = PADState(**response_data['pad'])
+        except (KeyError, TypeError):
+            response_data = None
+
+    if response_data is None:
         dialog = response_text
         pad = PADState( pleasure = 0.0, arousal = 0.0, dominance = 0.0)
         logger.warning(f"JSON parse failed for dialog/pad, raw response: {response_text!r}")
