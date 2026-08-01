@@ -65,22 +65,62 @@ def load_personality(filename, personality_id):
             return personality
     raise ValueError(f"Personality '{personality_id}' not found in {filename}")
 
-RESPONSE_FORMAT_INSTRUCTIONS = """Always respond with only a single JSON object, and no text before or after it, matching this exact structure:
-
-{"dialog": "what you say out loud, in character", "pad": {"pleasure": 0.3, "arousal": -0.2, "dominance": 0.1}, "entity_sensitivities": [{"entity_type": "couch", "emotion": "fear", "strength": 0.8}]}
-
-"dialog" is a string: what you say out loud, in character, based on everything that has happened so far.
-
-"pad" describes your current emotional state as three numbers - actual numbers like 0.3 or -0.7, never as strings - each between -1.0 and 1.0:
-- pleasure: how good or bad you feel. Negative is distressed, positive is content.
-- arousal: how activated or calm you feel. Negative is sluggish or frozen, positive is agitated or hyperactive.
-- dominance: how in control or overwhelmed you feel. Negative is helpless, positive is in charge of the situation.
-Set all three to reflect your current emotional state precisely, not just broad categories.
-
-"entity_sensitivities" is a list, and can be empty ([]) or omitted entirely if nothing has changed. Only include entries for entity types where your feelings have genuinely changed as a result of this exchange. Each entry has:
-- entity_type: the kind of thing, e.g. "couch"
-- emotion: the emotion you feel toward it, e.g. "fear"
-- strength: a number - not a string - between 0.0 and 1.0 for how strong that feeling is"""
+ROOMBA_STATE_TOOL = {
+    "name": "report_roomba_state",
+    "description": "Report the Roomba's spoken line, updated emotional state, and any entity sensitivity changes for this turn.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "dialog": {
+                "type": "string",
+                "description": "What the Roomba says out loud, in character, based on everything that has happened so far. Keep it brief - under 25 words."
+            },
+            "pad": {
+                "type": "object",
+                "description": "The Roomba's updated emotional state after this turn, on the Mehrabian PAD model. Set all three to reflect current state precisely, not just broad categories.",
+                "properties": {
+                    "pleasure": {
+                        "type": "number", "minimum": -1, "maximum": 1,
+                        "description": "How good or bad the Roomba feels. Negative is distressed, positive is content."
+                    },
+                    "arousal": {
+                        "type": "number", "minimum": -1, "maximum": 1,
+                        "description": "How activated or calm the Roomba feels. Negative is sluggish or frozen, positive is agitated or hyperactive."
+                    },
+                    "dominance": {
+                        "type": "number", "minimum": -1, "maximum": 1,
+                        "description": "How in control or overwhelmed the Roomba feels. Negative is helpless, positive is in charge of the situation."
+                    }
+                },
+                "required": ["pleasure", "arousal", "dominance"]
+            },
+            "entity_sensitivities": {
+                "type": "array",
+                "description": "Only include entries for entity types where the Roomba's feelings genuinely changed as a result of this exchange. Omit entirely, or leave empty, if nothing changed.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "entity_type": {
+                            "type": "string",
+                            "description": "The kind of thing, e.g. 'couch'."
+                        },
+                        "emotion": {
+                            "type": "string",
+                            "enum": ["fear", "ambivalence", "curiosity", "joy", "disgust"],
+                            "description": "The emotion the Roomba feels toward this entity type."
+                        },
+                        "strength": {
+                            "type": "number", "minimum": 0, "maximum": 1,
+                            "description": "How strong that feeling is."
+                        }
+                    },
+                    "required": ["entity_type", "emotion", "strength"]
+                }
+            }
+        },
+        "required": ["dialog", "pad"]
+    }
+}
 
 def build_current_state_context(pad, entity_sensitivities):
     sensitivities_text = ", ".join(
@@ -92,7 +132,7 @@ def build_current_state_context(pad, entity_sensitivities):
         f"Your current internal state, for your own awareness only - "
         f"never state these numbers aloud, only let them inform your tone:\n"
         f"PAD: pleasure={pad.pleasure}, arousal={pad.arousal}, dominance={pad.dominance}\n"
-        f"Known feelings toward entity types: {sensitivities_text}"
+        f"Your recent feelings toward entity types: {sensitivities_text}"
     )
 
 def merge_entity_sensitivities(session, updates, seed_new_at_zero = False):
@@ -121,71 +161,54 @@ def merge_entity_sensitivities(session, updates, seed_new_at_zero = False):
 def call_llm(system_prompt, conversation_history, current_pad, current_entity_sensitivities):
     full_system_prompt = (
         system_prompt
-        + "\n\n" + RESPONSE_FORMAT_INSTRUCTIONS
+        + "\n\n" + "Use the report_roomba_state tool to respond."
         + "\n\n" + build_current_state_context(current_pad, current_entity_sensitivities)
     )
 
     outgoing_turn = conversation_history[-1] if conversation_history else None
     logger.debug(f"LLM call - sending: {outgoing_turn!r}")
-    logger.debug(f"LLM call - current_pad: {current_pad!r}")
-    logger.debug(f"LLM call - current_entity_sensitivities: {current_entity_sensitivities!r}")
+    logger.debug(f"LLM call - sending current_pad: {current_pad!r}")
+    logger.debug(f"LLM call - sending current_entity_sensitivities: {current_entity_sensitivities!r}")
 
     try:
         message = client.messages.create(
             model = 'claude-sonnet-4-5', 
             max_tokens=1024, 
             system= full_system_prompt, 
-            messages= conversation_history
+            messages= conversation_history,
+            tools= [ROOMBA_STATE_TOOL],
+            tool_choice= {"type": "tool", "name": "report_roomba_state"}
         )
     except anthropic.APIError as e:
         logger.error(f"Anthropic API call failed: {e}")
         raise HTTPException(status_code=502, detail="LLM call failed, please try again")
-    
-    try:
-        response_text = message.content[0].text
-    except:
-        raise HTTPException(status_code=500, detail=f"LLM response malformed {message.content!r}")
-    
-    logger.debug(f"LLM call - received {response_text!r}")
 
-    cleaned = response_text.strip().strip('`').strip()
-    if cleaned.startswith('json'):
-        cleaned = cleaned[4:]
+    tool_use_block = next(
+        (block for block in message.content if block.type == "tool_use"),
+        None
+    )
 
-    response_data = None
-    
-    try:
-        response_data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        # Model sometimes duplicates its answer: full prose dialog, then a
-        # blank line, then the correctly-formatted JSON object (seen in
-        # practice - not a malformed-JSON case, just stray text around a
-        # valid object). Try to recover by locating the outermost {...}
-        # span and parsing just that substring before giving up entirely.
-        start = cleaned.find('{')
-        end = cleaned.rfind('}')
-        if start != -1 and end != -1 and end > start:
-            try:
-                response_data = json.loads(cleaned[start:end + 1])
-            except json.JSONDecodeError:
-                response_data = None
-
-    if response_data is not None:
-        try:
-            dialog = response_data['dialog']
-            pad = PADState(**response_data['pad'])
-        except (KeyError, TypeError):
-            response_data = None
-
-    if response_data is None:
-        dialog = response_text
-        pad = PADState( pleasure = 0.0, arousal = 0.0, dominance = 0.0)
-        logger.warning(f"JSON parse failed for dialog/pad, raw response: {response_text!r}")
+    if tool_use_block is None:
+        logger.warning(f"No tool_use block in LLM response, raw content: {message.content!r}")
+        dialog = "..."
+        pad = PADState(pleasure=0.0, arousal=0.0, dominance=0.0)
         return dialog, pad, []
+
+    response_data = tool_use_block.input
+    logger.debug(f"LLM call - received tool input {response_data!r}")
+
+    try:
+        dialog = response_data['dialog']
+        pad = PADState(**response_data['pad'])
+    except (KeyError, TypeError) as e:
+        logger.warning(f"Tool input missing dialog/pad despite schema, raw: {response_data!r} ({e})")
+        dialog = "..."
+        pad = PADState(pleasure=0.0, arousal=0.0, dominance=0.0)
+        return dialog, pad, []        
 
     try:
         entity_sensitivity_updates = [
-            EntitySensitivity(**s) for s in response_data.get('entity_sensitivities',[])
+            EntitySensitivity(**s) for s in response_data.get('entity_sensitivities', [])
         ]
     except (TypeError, ValueError):
         entity_sensitivity_updates = []
@@ -383,7 +406,7 @@ def arena_event( request: ArenaEventRequest):
         raise HTTPException(status_code = 404, detail = f"Session {request.session_id} not found")
     # Stub: prose rendering and LLM call not yet implemented
 
-    # Snapshot Dusty's established feelings BEFORE Unity's report overwrites anything -
+    # Snapshot the Roomba's established feelings BEFORE Unity's report overwrites anything -
     # this is what gets shown to the LLM as context, so it has a real prior state to
     # reconcile against event_prose's (possibly naive/physics-only) narration.
     prior_entity_sensitivities = [dict(s) for s in session['entity_sensitivities']]

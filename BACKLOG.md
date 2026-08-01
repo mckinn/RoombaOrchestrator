@@ -238,3 +238,22 @@ enough that such a split is clearly justified on its own merits - not as a
 one-off extraction of a single constant.
 
 Source: raised while reviewing the tool-use structured-output patch.
+
+## [19]. Roomba movement not disabled while chat input has focus
+
+WASD input still drives the Roomba while the player is actively typing in the
+therapist chat input field. `PlayerController2D` reads input unconditionally
+every frame with no awareness of UI focus state. Likely fix: check
+`TMP_InputField.isFocused` (or a shared "input is captured by UI" flag) and
+gate movement reads accordingly.
+
+Source: noted during Phase 3.5 testing (Unity/CollisionController work).
+
+## [20]. Chat input field does not wrap long text
+
+The `TMP_InputField` box itself (as opposed to the chat history bubbles,
+which wrap correctly) does not wrap long typed text before submission -
+likely a `Line Type` / text area sizing setting distinct from the bubble
+wrapping work done in Phase 2.5a. Cosmetic, low priority.
+
+Source: noted during Phase 3.5 testing (Unity/CollisionController work).
