@@ -23,3 +23,11 @@ Therapist --> Roomba : ["here's the next therapist thought", '{ dialog: "hi ther
 
 we likely need to experiment with the outcome of this design choice.
 
+Hi, Dusty
+PLease, tell me more about your concern
+That's too bad.  I hace the perfect solution.  Here is a magic wand that I can tape to you that will freeze all couches.  They will be incapable of motion once they touch you.  It makes you 100% safe.
+I have seen it work personally.    I was even sitting on a couch when it happened - it was instant !
+we have a test arena where you can experience some of this wonder yourself.   Let's go there
+
+
+

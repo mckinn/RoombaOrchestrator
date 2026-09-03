@@ -67,7 +67,7 @@ def load_personality(filename, personality_id):
 
 ROOMBA_STATE_TOOL = {
     "name": "report_roomba_state",
-    "description": "Report the Roomba's spoken line, updated emotional state, and any entity sensitivity changes for this turn.",
+    "description": "Report the Roomba's spoken line, updated emotional state, whether it should pause, and any entity sensitivity changes for this turn.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -94,6 +94,10 @@ ROOMBA_STATE_TOOL = {
                 },
                 "required": ["pleasure", "arousal", "dominance"]
             },
+            "should_pause": {
+                "type": "boolean",
+                "description": "Whether the Roomba should stop moving and hold still right now. This is a genuine decision the Roomba makes for itself, not a mechanical reflex - it can be true because the therapist asked it to stop, because of something that just happened (like a collision), or simply because the Roomba wants to, on its own. A resistant or defiant Roomba might not stop even when asked. Set false otherwise, including when the Roomba is refusing or resisting a request to stop."
+            },
             "entity_sensitivities": {
                 "type": "array",
                 "description": "Only include entries for entity types where the Roomba's feelings genuinely changed as a result of this exchange. Omit entirely, or leave empty, if nothing changed.",
@@ -118,7 +122,7 @@ ROOMBA_STATE_TOOL = {
                 }
             }
         },
-        "required": ["dialog", "pad"]
+        "required": ["dialog", "pad", "should_pause"]
     }
 }
 
@@ -192,7 +196,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         logger.warning(f"No tool_use block in LLM response, raw content: {message.content!r}")
         dialog = "..."
         pad = PADState(pleasure=0.0, arousal=0.0, dominance=0.0)
-        return dialog, pad, []
+        return dialog, pad, [], False
 
     response_data = tool_use_block.input
     logger.debug(f"LLM call - received tool input {response_data!r}")
@@ -204,7 +208,9 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         logger.warning(f"Tool input missing dialog/pad despite schema, raw: {response_data!r} ({e})")
         dialog = "..."
         pad = PADState(pleasure=0.0, arousal=0.0, dominance=0.0)
-        return dialog, pad, []        
+        return dialog, pad, [], False
+
+    should_pause = response_data.get('should_pause', False)
 
     try:
         entity_sensitivity_updates = [
@@ -214,7 +220,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         entity_sensitivity_updates = []
         logger.warning(f"entity_sensitivities parse failed, raw: {response_data.get('entity_sensitivities')!r}")
 
-    return dialog, pad, entity_sensitivity_updates
+    return dialog, pad, entity_sensitivity_updates, should_pause
 
 class Entity(BaseModel):
     entity_id: str
@@ -250,6 +256,7 @@ class TherapyMessageResponse(BaseModel):
     dialog: str
     pad: PADState
     entity_sensitivities: List[EntitySensitivity] = []
+    should_pause: bool = False
 
 class EndSessionRequest(BaseModel):
     session_id: str
@@ -282,14 +289,17 @@ class EmotionState(BaseModel):
 
 class ArenaEventRequest(BaseModel):
     session_id: str
-    event_type: Literal["enter", "proximity_threshold", "collision", "boundary_encountered"]
-    emotion_states: List[EmotionState]
+    event_type: Literal["enter", "proximity_threshold", "collision", "boundary_encountered", "dirt_progress"]
+    emotion_states: List[EmotionState] = []
     direction: Optional[str] = None
+    percent_complete: Optional[float] = None  # dirt_progress only
+    is_complete: Optional[bool] = None        # dirt_progress only
 
 class ArenaEventResponse(BaseModel):
     dialog: str
     pad: PADState
     entity_sensitivities: List[EntitySensitivity]
+    should_pause: bool = False
 
 @app.get("/health",  description="are you alive?")
 def health_check():
@@ -341,7 +351,7 @@ def therapy_message(request: TherapyMessageRequest):
         "content": request.message
     })
 
-    dialog, pad, entity_sensitivity_updates = call_llm(
+    dialog, pad, entity_sensitivity_updates, should_pause = call_llm(
         session['personality']['system_prompt'], 
         session['conversation_history'],
         session['pad'],
@@ -359,7 +369,8 @@ def therapy_message(request: TherapyMessageRequest):
     return TherapyMessageResponse(
         dialog=dialog,
         pad=pad,
-        entity_sensitivities = [EntitySensitivity(**s) for s in session['entity_sensitivities']]
+        entity_sensitivities = [EntitySensitivity(**s) for s in session['entity_sensitivities']],
+        should_pause=should_pause
     )
 
 @app.get("/session/state", response_model=SessionStateResponse,  description="synchronous retrieval of important session state details.")
@@ -404,6 +415,59 @@ def arena_event( request: ArenaEventRequest):
 
     if session is None:
         raise HTTPException(status_code = 404, detail = f"Session {request.session_id} not found")
+
+    if request.event_type == "dirt_progress":
+        # Distinct shape from every other event type - no entity_sensitivities
+        # involved at all, purely an aggregate progress announcement. Bypasses
+        # render_event_prose (built around the entity+emotion template, which
+        # doesn't fit this) and the pre-LLM merge_entity_sensitivities call
+        # (nothing reported by Unity to merge). The LLM's own read, applied
+        # after the call below, can still shift entity_sensitivities if it
+        # chooses to - same as every other event type.
+        if request.percent_complete is None:
+            raise HTTPException(status_code=422, detail="percent_complete is required for event_type 'dirt_progress'")
+
+        roomba_name = session['personality']['name']
+        if request.is_complete:
+            event_prose = (
+                f"{roomba_name} finishes a final sweep of the room - "
+                f"about {request.percent_complete:.0f}% of the reachable dirt has been collected."
+            )
+        else:
+            event_prose = (
+                f"{roomba_name} pauses mid-clean, having collected "
+                f"about {request.percent_complete:.0f}% of the reachable dirt so far."
+            )
+
+        prior_entity_sensitivities = [dict(s) for s in session['entity_sensitivities']]
+
+        session['conversation_history'].append({
+            "role": "user",
+            "content": event_prose
+        })
+
+        dialog, pad, entity_sensitivity_updates, should_pause = call_llm(
+            session['personality']['system_prompt'],
+            session['conversation_history'],
+            session['pad'],
+            prior_entity_sensitivities
+        )
+
+        session['conversation_history'].append({
+            "role": "assistant",
+            "content": dialog
+        })
+
+        session['pad'] = pad
+        merge_entity_sensitivities(session, entity_sensitivity_updates)
+
+        return ArenaEventResponse(
+            dialog=dialog,
+            pad=pad,
+            entity_sensitivities=[EntitySensitivity(**s) for s in session['entity_sensitivities']],
+            should_pause=should_pause
+        )
+
     # Stub: prose rendering and LLM call not yet implemented
 
     # Snapshot the Roomba's established feelings BEFORE Unity's report overwrites anything -
@@ -432,7 +496,7 @@ def arena_event( request: ArenaEventRequest):
         "content": event_prose
     })
 
-    dialog, pad, entity_sensitivity_updates = call_llm(
+    dialog, pad, entity_sensitivity_updates, should_pause = call_llm(
         session['personality']['system_prompt'],
         session['conversation_history'],
         session['pad'],
@@ -454,7 +518,8 @@ def arena_event( request: ArenaEventRequest):
     return ArenaEventResponse(
         dialog=dialog,
         pad = pad,
-        entity_sensitivities= [EntitySensitivity(**s) for s in session['entity_sensitivities']]
+        entity_sensitivities= [EntitySensitivity(**s) for s in session['entity_sensitivities']],
+        should_pause=should_pause
     )
 
 @app.post("/session/end", response_model=EndSessionResponse, description="end a specific session")
