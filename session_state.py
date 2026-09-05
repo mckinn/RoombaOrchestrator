@@ -1,0 +1,31 @@
+"""
+Owns the in-memory session store and the logic for merging entity_sensitivity
+updates into a session. See BACKLOG.md #14 (no persistence/locking - known,
+accepted) and #8 (merge is pure overwrite - known, accepted for now).
+"""
+
+sessions = {}
+
+
+def merge_entity_sensitivities(session, updates, seed_new_at_zero=False):
+    for u in updates:
+        target = next(
+            (s for s in session['entity_sensitivities'] if s['entity_type'] == u.entity_type),
+            None
+        )
+        if target is not None:  # override with update
+            target['emotion'] = u.emotion
+            target['strength'] = u.strength
+
+        elif seed_new_at_zero:  # create a new 0 value entity sensitivity
+            session['entity_sensitivities'].append({
+                "entity_type": u.entity_type,
+                "emotion": "none",
+                "strength": 0.0
+            })
+        else:
+            session['entity_sensitivities'].append({  # add a new updated values entry
+                "entity_type": u.entity_type,
+                "emotion": u.emotion,
+                "strength": u.strength
+            })
