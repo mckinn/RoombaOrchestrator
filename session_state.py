@@ -1,13 +1,18 @@
+import logging
+
 """
 Owns the in-memory session store and the logic for merging entity_sensitivity
 updates into a session. See BACKLOG.md #14 (no persistence/locking - known,
 accepted) and #8 (merge is pure overwrite - known, accepted for now).
 """
 
+logger = logging.getLogger("roomba_orchestrator")
+
 sessions = {}
 
 
 def merge_entity_sensitivities(session, updates, seed_new_at_zero=False):
+    logger.debug(f"merge_entity_sensitivities: updates - {updates}")
     for u in updates:
         target = next(
             (s for s in session['entity_sensitivities'] if s['entity_type'] == u.entity_type),
@@ -29,3 +34,4 @@ def merge_entity_sensitivities(session, updates, seed_new_at_zero=False):
                 "emotion": u.emotion,
                 "strength": u.strength
             })
+    logger.debug(f"merge_entity_sensitivities: session[entity_sensitivities] - {session['entity_sensitivities']}")

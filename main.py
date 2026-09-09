@@ -16,6 +16,8 @@ print(f"Log Level Names are... {log_level_name}, {base_log_level_name}")
 logger = logging.getLogger("roomba_orchestrator")
 logger.setLevel(log_level)
 
+import time
+
 from fastapi import FastAPI, HTTPException
 
 from models import (
@@ -34,9 +36,15 @@ from models import (
     ArenaEventResponse,
 )
 from personalities import load_personality
-from event_prose import render_event_prose
+from event_prose import render_event_prose, render_report_facts
 from llm import call_llm
 from session_state import sessions, merge_entity_sensitivities
+import event_aggregation
+
+# Event types that always carry populated emotion_states and are routed
+# through the Collector instead of being reported to the LLM unconditionally
+# - see Planning_Autonomous_Movement.md, Aggregation Model, "Scope".
+AGGREGATED_EVENT_TYPES = {"collision", "proximity_threshold"}
 
 app = FastAPI()
 
@@ -69,7 +77,8 @@ def start_session(request: StartSessionRequest):
         "conversation_history": [],
         "pad": initial_pad,
         "known_entities": [dict(e) for e in request.arena_manifest] if request.arena_manifest else [],
-        "entity_sensitivities": entity_sensitivities
+        "entity_sensitivities": entity_sensitivities,
+        "collector": event_aggregation.new_collector(),
     }
 
     return StartSessionResponse(
@@ -214,26 +223,82 @@ def arena_event(request: ArenaEventRequest):
             should_pause=should_pause
         )
 
-    # Snapshot the Roomba's established feelings BEFORE Unity's report overwrites anything -
-    # this is what gets shown to the LLM as context, so it has a real prior state to
-    # reconcile against event_prose's (possibly naive/physics-only) narration.
-    prior_entity_sensitivities = [dict(s) for s in session['entity_sensitivities']]
+    # entity_sensitivities bookkeeping happens unconditionally for every
+    # event type here, regardless of whether it goes on to cross an
+    # aggregation threshold below - that's a separate concern (see
+    # Planning_Autonomous_Movement.md, Aggregation Model). Aggregation here
+    # is simple replacement - the newest reported strength/emotion for a
+    # given entity_type overwrites whatever was there (see BACKLOG.md #8).
+    #
+    # I believe the comment below to be incorrect - the initial sensitivity is
+    # seeded by the game as 'ambivalence' - this part needs deeper thought.
+    # for now it is turned off.
+    #
+    # New entity_types discovered here seed at zero, per the original
+    # decision - a raw physics reading on first contact isn't a
+    # narratively meaningful value.
+    merge_entity_sensitivities(session, request.emotion_states, seed_new_at_zero=False)
 
-    # Aggregation is simple replacement for now - the newest reported strength/emotion
-    # for a given entity_type overwrites whatever was there. Revisit once there's a
-    # running game to observe real aggregation needs against (see BACKLOG.md).
-    # New entity_types discovered here seed at zero, per the original decision -
-    # a raw physics reading on first contact isn't a narratively meaningful value.
-    merge_entity_sensitivities(session, request.emotion_states, seed_new_at_zero=True)
+    if request.event_type in AGGREGATED_EVENT_TYPES:
+        # Every event here feeds the Collector; only a threshold crossing
+        # produces a report and an LLM turn. See Planning_Autonomous_Movement.md,
+        # Aggregation Model - this replaces the old unconditional
+        # render_event_prose + call_llm for these two event types.
+        if not request.emotion_states:
+            raise HTTPException(
+                status_code=422,
+                detail=f"emotion_states cannot be empty for event type '{request.event_type}'"
+            )
 
-    try:
-        event_prose = render_event_prose(
-            request.event_type,
-            session['personality']['name'],
-            request.emotion_states
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        now = time.time()
+        report = None
+        for es in request.emotion_states:
+            session['collector'], es_report = event_aggregation.record_event(
+                session['collector'], es.entity_type, es.entity_id, es.emotion, es.strength, now
+            )
+            if es_report is not None:
+                # Unity sends exactly one EmotionState per event today (see
+                # Planning_Autonomous_Movement.md's Unity-source
+                # investigation); if that ever changes and more than one
+                # entry triggers a report, the most recent one wins here -
+                # revisit if that ever actually happens.
+                report = es_report
+
+        if report is None:
+            # Accumulated without crossing a threshold this time - no LLM
+            # turn, no new dialog or PAD. See Planning_Autonomous_Movement.md,
+            # Parking Lot: "response payload needs a lightweight 'still
+            # accumulating' shape."
+            return ArenaEventResponse(
+                dialog="",
+                pad=session['pad'],
+                entity_sensitivities=[EntitySensitivity(**s) for s in session['entity_sensitivities']],
+                should_pause=False,
+                flushed=False,
+            )
+
+        # Snapshot BEFORE the LLM call - this is the prior state shown to
+        # the LLM as context, matching every other call_llm call site.
+        prior_entity_sensitivities = [dict(s) for s in session['entity_sensitivities']]
+        event_prose = render_report_facts(report)
+
+        logger.debug(f"LLM call - sending event prose: {event_prose!r}")
+
+    else:
+        # enter / boundary_encountered are out of the Collector's scope -
+        # they can have empty emotion_states (BACKLOG.md #10) and aren't
+        # the noisy/repetitive event types this aggregation work targets -
+        # so they're still reported to the LLM unconditionally, unchanged
+        # from before this change.
+        prior_entity_sensitivities = [dict(s) for s in session['entity_sensitivities']]
+        try:
+            event_prose = render_event_prose(
+                request.event_type,
+                session['personality']['name'],
+                request.emotion_states
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     session['conversation_history'].append({
         "role": "user",

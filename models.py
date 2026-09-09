@@ -102,3 +102,13 @@ class ArenaEventResponse(BaseModel):
     pad: PADState
     entity_sensitivities: List[EntitySensitivity]
     should_pause: bool = False
+    # True for every event type except a collision/proximity_threshold that
+    # only updated the aggregation Collector without crossing a threshold -
+    # in that case dialog is "" and pad/entity_sensitivities are simply the
+    # session's unchanged current values, since no LLM turn happened. See
+    # Planning_Autonomous_Movement.md, Parking Lot: "/arena/event response
+    # payload needs a lightweight 'still accumulating' shape." This is the
+    # additive, same-shape version of that - not the fuller distinct-shape
+    # design that was also discussed, which would need a corresponding
+    # Unity-side change to SessionManager.cs's OrchestratorResponse handling.
+    flushed: bool = True

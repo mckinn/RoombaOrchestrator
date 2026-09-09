@@ -17,6 +17,23 @@ logger = logging.getLogger("roomba_orchestrator")
 
 client = anthropic.Anthropic()
 
+# Paired with event_prose.render_report_facts() - Sequenced Plan Step 4's
+# resolved design (2026-09-08, Planning_Autonomous_Movement.md, Aggregation
+# Model, "Option 2: hand the LLM the facts, let it narrate"). A pattern
+# summary is structurally different from every other turn in
+# conversation_history (which all read as one narrated sentence) -
+# deliberately so, since it's reporting an aggregate the Orchestrator
+# already had to summarize, not a single raw sensation - but the LLM still
+# needs to know that's what it's looking at and what to do with it.
+PATTERN_SUMMARY_GUIDANCE = (
+    "Sometimes what happens next is a pattern summary rather than a single "
+    "narrated moment - a block of text starting with \"Pattern:\" that "
+    "states counts and durations instead of describing an experience in "
+    "words. Treat it exactly like anything else that just happened to you: "
+    "let the numbers genuinely inform how you feel, and respond in your "
+    "own voice - do not just read the numbers back."
+)
+
 ROOMBA_STATE_TOOL = {
     "name": "report_roomba_state",
     "description": "Report the Roomba's spoken line, updated emotional state, whether it should pause, and any entity sensitivity changes for this turn.",
@@ -52,7 +69,7 @@ ROOMBA_STATE_TOOL = {
             },
             "entity_sensitivities": {
                 "type": "array",
-                "description": "Only include entries for entity types where the Roomba's feelings genuinely changed as a result of this exchange. Omit entirely, or leave empty, if nothing changed.",
+                "description": "Only include entries for entity types where the Roomba's feelings have changed as a result of this exchange. Omit entirely, or leave empty, if nothing changed.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -89,7 +106,8 @@ def build_current_state_context(pad, entity_sensitivities):
         f"Your current internal state, for your own awareness only - "
         f"never state these numbers aloud, only let them inform your tone:\n"
         f"PAD: pleasure={pad.pleasure}, arousal={pad.arousal}, dominance={pad.dominance}\n"
-        f"Your recent feelings toward entity types: {sensitivities_text}"
+        f"Your recent feelings toward things that you might bump into: {sensitivities_text}."
+        f"If the entity is new to you, we encourage curiosity towards it."
     )
 
 
@@ -97,6 +115,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
     full_system_prompt = (
         system_prompt
         + "\n\n" + "Use the report_roomba_state tool to respond."
+        + "\n\n" + PATTERN_SUMMARY_GUIDANCE
         + "\n\n" + build_current_state_context(current_pad, current_entity_sensitivities)
     )
 
@@ -147,6 +166,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         entity_sensitivity_updates = [
             EntitySensitivity(**s) for s in response_data.get('entity_sensitivities', [])
         ]
+        logger.debug(f"entity_sensitivities parse succeeded, raw: {response_data.get('entity_sensitivities')!r}, cooked: {entity_sensitivity_updates} ")
     except (TypeError, ValueError):
         entity_sensitivity_updates = []
         logger.warning(f"entity_sensitivities parse failed, raw: {response_data.get('entity_sensitivities')!r}")
