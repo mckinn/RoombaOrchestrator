@@ -27,6 +27,23 @@ class EntitySensitivity(BaseModel):  # different semantics than emotion, but sam
     strength: float
 
 
+class MovementDirective(BaseModel):
+    """
+    A resolved LLM movement directive, ready for Unity - see
+    Movement_Concurrency_Plan.md, section 4, items 1-3, and
+    Planning_Autonomous_Movement.md, Sequenced Plan item 5 / Open Items
+    item 5. target_entity_id is always a resolved entity_id, never a
+    roster name - Unity has no concept of an Orchestrator-invented name
+    (Movement_Concurrency_Plan.md section 4, item 3). direction/percent
+    together determine Unity-side D = d_current * (1 -+ percent/100),
+    computed once from a live distance snapshot Unity-side (section 4,
+    item 1) - the Orchestrator never computes or knows an actual distance.
+    """
+    target_entity_id: str
+    direction: Literal["closer", "further"]
+    percent: float  # 0-100, clamped defensively in llm.py regardless of what the LLM returns
+
+
 class StartSessionRequest(BaseModel):
     roomba_id: str
     arena_manifest: Optional[List[Entity]] = None
@@ -51,6 +68,7 @@ class TherapyMessageResponse(BaseModel):
     pad: PADState
     entity_sensitivities: List[EntitySensitivity] = []
     should_pause: bool = False
+    movement_directive: Optional[MovementDirective] = None
 
 
 class EndSessionRequest(BaseModel):
@@ -112,3 +130,4 @@ class ArenaEventResponse(BaseModel):
     # design that was also discussed, which would need a corresponding
     # Unity-side change to SessionManager.cs's OrchestratorResponse handling.
     flushed: bool = True
+    movement_directive: Optional[MovementDirective] = None

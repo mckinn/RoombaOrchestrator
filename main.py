@@ -23,6 +23,7 @@ from fastapi import FastAPI, HTTPException
 from models import (
     PADState,
     EntitySensitivity,
+    MovementDirective,
     StartSessionRequest,
     StartSessionResponse,
     TherapyMessageRequest,
@@ -40,6 +41,7 @@ from event_prose import render_event_prose, render_report_facts
 from llm import call_llm
 from session_state import sessions, merge_entity_sensitivities
 import event_aggregation
+import entity_roster
 
 # Event types that always carry populated emotion_states and are routed
 # through the Collector instead of being reported to the LLM unconditionally
@@ -47,6 +49,35 @@ import event_aggregation
 AGGREGATED_EVENT_TYPES = {"collision", "proximity_threshold"}
 
 app = FastAPI()
+
+
+def resolve_movement_directive(session, raw_directive):
+    """
+    Resolve a raw (target_name, direction, percent) directive - already
+    parsed and defensively validated by llm.call_llm() - into a
+    MovementDirective carrying a resolved entity_id, ready to go out to
+    Unity. Returns None if there was no directive this turn, OR if
+    target_name doesn't match anything currently on this session's roster
+    (evicted since the LLM was told about it, or hallucinated) -
+    Movement_Concurrency_Plan.md section 4, item 3: an unresolvable
+    directive is dropped here, not treated as an error.
+    """
+    if raw_directive is None:
+        return None
+
+    entry = entity_roster.resolve_name(session['entity_roster'], raw_directive['target_name'])
+    if entry is None:
+        logger.warning(
+            f"movement_directive referenced unknown/evicted name "
+            f"{raw_directive['target_name']!r} - dropping directive"
+        )
+        return None
+
+    return MovementDirective(
+        target_entity_id=entry['entity_id'],
+        direction=raw_directive['direction'],
+        percent=raw_directive['percent'],
+    )
 
 
 @app.get("/health", description="are you alive?")
@@ -79,6 +110,11 @@ def start_session(request: StartSessionRequest):
         "known_entities": [dict(e) for e in request.arena_manifest] if request.arena_manifest else [],
         "entity_sensitivities": entity_sensitivities,
         "collector": event_aggregation.new_collector(),
+        # Deliberately separate from known_entities above - see
+        # Movement_Concurrency_Plan.md section 4 item 2 and
+        # Planning_Autonomous_Movement.md Parking Lot. Populated only from
+        # `collision` events in /arena/event, never from arena_manifest.
+        "entity_roster": entity_roster.new_roster(),
     }
 
     return StartSessionResponse(
@@ -103,11 +139,12 @@ def therapy_message(request: TherapyMessageRequest):
         "content": request.message
     })
 
-    dialog, pad, entity_sensitivity_updates, should_pause = call_llm(
+    dialog, pad, entity_sensitivity_updates, should_pause, raw_directive = call_llm(
         session['personality']['system_prompt'],
         session['conversation_history'],
         session['pad'],
-        session['entity_sensitivities']
+        session['entity_sensitivities'],
+        entity_roster.list_entries(session['entity_roster'])
     )
 
     session['conversation_history'].append({
@@ -122,7 +159,8 @@ def therapy_message(request: TherapyMessageRequest):
         dialog=dialog,
         pad=pad,
         entity_sensitivities=[EntitySensitivity(**s) for s in session['entity_sensitivities']],
-        should_pause=should_pause
+        should_pause=should_pause,
+        movement_directive=resolve_movement_directive(session, raw_directive)
     )
 
 
@@ -201,11 +239,12 @@ def arena_event(request: ArenaEventRequest):
             "content": event_prose
         })
 
-        dialog, pad, entity_sensitivity_updates, should_pause = call_llm(
+        dialog, pad, entity_sensitivity_updates, should_pause, raw_directive = call_llm(
             session['personality']['system_prompt'],
             session['conversation_history'],
             session['pad'],
-            prior_entity_sensitivities
+            prior_entity_sensitivities,
+            entity_roster.list_entries(session['entity_roster'])
         )
 
         session['conversation_history'].append({
@@ -220,7 +259,8 @@ def arena_event(request: ArenaEventRequest):
             dialog=dialog,
             pad=pad,
             entity_sensitivities=[EntitySensitivity(**s) for s in session['entity_sensitivities']],
-            should_pause=should_pause
+            should_pause=should_pause,
+            movement_directive=resolve_movement_directive(session, raw_directive)
         )
 
     # entity_sensitivities bookkeeping happens unconditionally for every
@@ -251,6 +291,24 @@ def arena_event(request: ArenaEventRequest):
             )
 
         now = time.time()
+
+        if request.event_type == "collision":
+            # Roster population is gated on `collision` specifically, NOT
+            # on AGGREGATED_EVENT_TYPES (which also includes
+            # proximity_threshold) - a hard rule, deliberate game design:
+            # "if the Roomba has not run into an entity, it for all
+            # intents and purposes does not exist." See
+            # Movement_Concurrency_Plan.md section 4 item 2. Happens
+            # unconditionally for every collision, regardless of whether
+            # it goes on to cross an aggregation threshold below - roster
+            # membership tracks "have we ever collided with this," which
+            # is independent of the Collector/Report mechanism, exactly
+            # like Unity's activeJourneys entries.
+            for es in request.emotion_states:
+                session['entity_roster'], _ = entity_roster.record_collision(
+                    session['entity_roster'], es.entity_id, es.entity_type, now
+                )
+
         report = None
         for es in request.emotion_states:
             session['collector'], es_report = event_aggregation.record_event(
@@ -305,11 +363,12 @@ def arena_event(request: ArenaEventRequest):
         "content": event_prose
     })
 
-    dialog, pad, entity_sensitivity_updates, should_pause = call_llm(
+    dialog, pad, entity_sensitivity_updates, should_pause, raw_directive = call_llm(
         session['personality']['system_prompt'],
         session['conversation_history'],
         session['pad'],
-        prior_entity_sensitivities
+        prior_entity_sensitivities,
+        entity_roster.list_entries(session['entity_roster'])
     )
 
     session['conversation_history'].append({
@@ -328,7 +387,8 @@ def arena_event(request: ArenaEventRequest):
         dialog=dialog,
         pad=pad,
         entity_sensitivities=[EntitySensitivity(**s) for s in session['entity_sensitivities']],
-        should_pause=should_pause
+        should_pause=should_pause,
+        movement_directive=resolve_movement_directive(session, raw_directive)
     )
 
 
