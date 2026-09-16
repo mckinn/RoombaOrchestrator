@@ -30,7 +30,7 @@ data out (a Collector is a plain nested dict; nothing here reaches into
 session_state.sessions or knows about FastAPI/Pydantic). record_event()
 does not mutate its input - it returns a new Collector - so a sequence of
 calls is trivially replayable and testable without a running session, per
-BACKLOG.md #13's concern about aggregation logic being easy to silently
+a JIRA backlog concern about aggregation logic being easy to silently
 break and hard to catch via manual testing alone.
 
 Scope: this module is meaningful only for event types that always carry a

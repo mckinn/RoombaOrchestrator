@@ -104,6 +104,15 @@ class EmotionState(BaseModel):
     entity_type: str
     emotion: str
     strength: float
+    # Phase 2 (Narrative_Log_Stream_Plan.md section 6): populated by Unity's
+    # CollisionController only for a "collision" event_type where
+    # JourneyCalculator actually created/refreshed a Journey for this entity
+    # (i.e. the entity's sensitivity was known and not "none" - see
+    # JourneyCalculator.HandleEntityCollision). Left at their defaults for
+    # every other event_type/case, which story_log.record_collision_or_proximity
+    # treats as "no journey started" and renders the plain narration line.
+    journey_started: bool = False
+    journey_distance: Optional[float] = None
 
 
 class ArenaEventRequest(BaseModel):
