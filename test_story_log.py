@@ -1,8 +1,8 @@
 """
 Synthetic scenario tests for story_log.py - no FastAPI, no Unity, no LLM.
 Plain assert-based script, consistent with test_event_aggregation.py and
-test_entity_roster.py's existing practice (per the JIRA backlog) - no
-pytest dependency introduced.
+test_entity_roster.py's existing practice (BACKLOG.md #13) - no pytest
+dependency introduced.
 """
 
 import os
@@ -143,27 +143,51 @@ def scenario_movement_directive_wording():
     check("movement directive: further -> away from", further == "Dusty-LLM directs the roomba to move away from chair-01.")
 
 
+# Updated 2026-09-18 (Pause_Redesign_Implementation_Plan.md): record_pause's
+# third argument is now the nullable pause_directive ("pause" | "resume" |
+# None), not the old should_pause boolean - these scenarios exercise the
+# new tri-state contract, including resume now producing a real line
+# (it used to always return None - see the module's prior docstring).
+
 def scenario_pause_transition_logs_once():
     state = story_log.new_story_state()
-    state, line1 = story_log.record_pause(state, "Dusty", True)
-    state, line2 = story_log.record_pause(state, "Dusty", True)
-    check("pause: first True logs", line1 == "Dusty pauses.")
-    check("pause: repeated True does not re-log", line2 is None)
+    state, line1 = story_log.record_pause(state, "Dusty", "pause")
+    state, line2 = story_log.record_pause(state, "Dusty", "pause")
+    check("pause: first 'pause' logs", line1 == "Dusty pauses.")
+    check("pause: repeated 'pause' does not re-log", line2 is None)
 
 
-def scenario_pause_false_then_true_logs_again():
+def scenario_resume_after_pause_logs_and_transitions_back():
     state = story_log.new_story_state()
-    state, _ = story_log.record_pause(state, "Dusty", True)
-    state, resume_line = story_log.record_pause(state, "Dusty", False)
-    state, line2 = story_log.record_pause(state, "Dusty", True)
-    check("pause: false transition produces no line", resume_line is None)
-    check("pause: true again after false logs again", line2 == "Dusty pauses.")
+    state, _ = story_log.record_pause(state, "Dusty", "pause")
+    state_after_resume, resume_line = story_log.record_pause(state, "Dusty", "resume")
+    _, line2 = story_log.record_pause(state_after_resume, "Dusty", "pause")
+    check("resume: 'resume' after 'pause' logs", resume_line == "Dusty resumes.")
+    check("resume: was_paused cleared after resume", state_after_resume["was_paused"] is False)
+    check("pause: 'pause' again after resume logs again", line2 == "Dusty pauses.")
+
+
+def scenario_no_opinion_and_redundant_directives_are_noops():
+    state = story_log.new_story_state()
+    state, line1 = story_log.record_pause(state, "Dusty", None)
+    check("no opinion while unpaused: no line", line1 is None)
+    check("no opinion while unpaused: state unchanged", state["was_paused"] is False)
+
+    state, _ = story_log.record_pause(state, "Dusty", "pause")
+    state, line2 = story_log.record_pause(state, "Dusty", None)
+    check("no opinion while paused: no line", line2 is None)
+    check("no opinion while paused: stays paused", state["was_paused"] is True)
+
+    state2 = story_log.new_story_state()
+    state2, line3 = story_log.record_pause(state2, "Dusty", "resume")
+    check("'resume' while never paused: no line", line3 is None)
+    check("'resume' while never paused: stays unpaused", state2["was_paused"] is False)
 
 
 def scenario_record_pause_does_not_mutate_input():
     state = story_log.new_story_state()
     state_before = dict(state)
-    story_log.record_pause(state, "Dusty", True)
+    story_log.record_pause(state, "Dusty", "pause")
     check("pause immutability: original state untouched", state == state_before)
 
 
@@ -221,7 +245,8 @@ def main():
     scenario_pattern_report_all_instances_and_rollup()
     scenario_movement_directive_wording()
     scenario_pause_transition_logs_once()
-    scenario_pause_false_then_true_logs_again()
+    scenario_resume_after_pause_logs_and_transitions_back()
+    scenario_no_opinion_and_redundant_directives_are_noops()
     scenario_record_pause_does_not_mutate_input()
     scenario_open_write_close_round_trip()
     scenario_two_sessions_get_distinct_files()

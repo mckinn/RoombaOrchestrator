@@ -7,6 +7,7 @@ else in the Orchestrator goes through.
 """
 
 import logging
+import json
 
 import anthropic
 from fastapi import HTTPException
@@ -105,7 +106,7 @@ MOVEMENT_AGENCY_GUIDANCE = (
 
 ROOMBA_STATE_TOOL = {
     "name": "report_roomba_state",
-    "description": "Report the Roomba's spoken line, updated emotional state, whether it should pause, and any entity sensitivity changes for this turn.",
+    "description": "Report the Roomba's spoken line, updated emotional state, any deliberate pause/resume decision, and any entity sensitivity changes for this turn.",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -132,9 +133,33 @@ ROOMBA_STATE_TOOL = {
                 },
                 "required": ["pleasure", "arousal", "dominance"]
             },
-            "should_pause": {
-                "type": "boolean",
-                "description": "Whether the Roomba should stop moving and hold still right now. This is a genuine decision the Roomba makes for itself, not a mechanical reflex - it can be true because the therapist asked it to stop, because of something that just happened (like a collision), or simply because the Roomba wants to, on its own. A resistant or defiant Roomba might not stop even when asked. Set false otherwise, including when the Roomba is refusing or resisting a request to stop."
+            # Replaces the old should_pause boolean (2026-09-18 -
+            # Pause_Redesign_Implementation_Plan.md). That field had to be
+            # actively re-asserted or re-negated every single turn to mean
+            # anything, which implicitly asked the model to track a state
+            # machine it never actually controlled half of (there was no
+            # real resume signal at all). This field asks for the opposite:
+            # say nothing on the overwhelming majority of turns, and only
+            # speak up at the moment you're actually changing something.
+            "pause_directive": {
+                "type": "string",
+                "enum": ["pause", "resume"],
+                "description": (
+                    "Only include this field when you are making a deliberate, "
+                    "conscious decision to change whether the Roomba is currently "
+                    "moving. 'pause' means stop and hold still right now - because "
+                    "the therapist asked, because of something that just happened, "
+                    "or simply because you want to. 'resume' means start moving "
+                    "again, for the same range of reasons. Omit this field entirely "
+                    "on every turn where you are not making that decision right now "
+                    "- you do not need to track or restate whether the Roomba is "
+                    "already paused or already moving; simply act when you decide "
+                    "to change it, and say nothing about it otherwise. A resistant "
+                    "or defiant Roomba might not pause even when asked, and is not "
+                    "obligated to resume just because time has passed or the "
+                    "conversation has moved on - resuming, like pausing, has to be "
+                    "an actual choice you're making."
+                )
             },
             "entity_sensitivities": {
                 "type": "array",
@@ -180,7 +205,7 @@ ROOMBA_STATE_TOOL = {
                 "required": ["target_name", "direction", "percent"]
             }
         },
-        "required": ["dialog", "pad", "should_pause"]
+        "required": ["dialog", "pad"]
     }
 }
 
@@ -259,8 +284,12 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         logger.warning(f"No tool_use block in LLM response, raw content: {message.content!r}")
         dialog = "..."
         pad = PADState(pleasure=0.0, arousal=0.0, dominance=0.0)
-        return dialog, pad, [], False, None
+        # No LLM turn actually happened, so there's no opinion to report -
+        # None (not "false") is the correct default now that pause_directive
+        # is a genuine tri-state (see models.py's TherapyMessageResponse).
+        return dialog, pad, [], None, None
 
+    logger.debug(f"LLM call - response - tool_use_block {tool_use_block}")
     response_data = tool_use_block.input
     logger.debug(f"LLM call - received tool input {response_data!r}")
 
@@ -271,9 +300,17 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         logger.warning(f"Tool input missing dialog/pad despite schema, raw: {response_data!r} ({e})")
         dialog = "..."
         pad = PADState(pleasure=0.0, arousal=0.0, dominance=0.0)
-        return dialog, pad, [], False, None
+        return dialog, pad, [], None, None
 
-    should_pause = response_data.get('should_pause', False)
+    # None if omitted (the normal case on most turns) or if the model
+    # returned something outside the schema's enum despite tool-use
+    # constraints not being a hard guarantee of actual output - see the
+    # movement_directive percent-clamping comment below for the same
+    # "don't trust the schema alone" reasoning.
+    pause_directive = response_data.get('pause_directive')
+    if pause_directive not in (None, "pause", "resume"):
+        logger.warning(f"pause_directive had an unexpected value, ignoring: {pause_directive!r}")
+        pause_directive = None
 
     try:
         entity_sensitivity_updates = [
@@ -318,4 +355,4 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         except (KeyError, TypeError, ValueError) as e:
             logger.warning(f"movement_directive parse failed, raw: {raw!r} ({e})")
 
-    return dialog, pad, entity_sensitivity_updates, should_pause, raw_movement_directive
+    return dialog, pad, entity_sensitivity_updates, pause_directive, raw_movement_directive

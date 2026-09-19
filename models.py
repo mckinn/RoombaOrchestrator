@@ -67,7 +67,14 @@ class TherapyMessageResponse(BaseModel):
     dialog: str
     pad: PADState
     entity_sensitivities: List[EntitySensitivity] = []
-    should_pause: bool = False
+    # Replaces the old one-directional should_pause: bool (2026-09-18 -
+    # Pause_Redesign_Implementation_Plan.md). None means "no opinion this
+    # turn, leave pause state exactly as it is" - it is not equivalent to
+    # either "false" or "resume" from the old field. "pause" and "resume"
+    # are both genuine, LLM-originated decisions now; see llm.py's
+    # ROOMBA_STATE_TOOL for the prompt-facing description of when each is
+    # used.
+    pause_directive: Optional[Literal["pause", "resume"]] = None
     movement_directive: Optional[MovementDirective] = None
 
 
@@ -128,7 +135,9 @@ class ArenaEventResponse(BaseModel):
     dialog: str
     pad: PADState
     entity_sensitivities: List[EntitySensitivity]
-    should_pause: bool = False
+    # See TherapyMessageResponse.pause_directive above - same field,
+    # same "None means no opinion" semantics, same reasoning.
+    pause_directive: Optional[Literal["pause", "resume"]] = None
     # True for every event type except a collision/proximity_threshold that
     # only updated the aggregation Collector without crossing a threshold -
     # in that case dialog is "" and pad/entity_sensitivities are simply the

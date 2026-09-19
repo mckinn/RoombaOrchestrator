@@ -20,16 +20,27 @@ sentences rather than a second template set), collision/proximity with
 first-contact + sequential-duplicate suppression, aggregation pattern
 reports (naming the actual entity via the roster - deliberately richer than
 event_prose.render_report_facts, which stays anonymous for the LLM's sake),
-LLM movement directives, and LLM-directed pause (should_pause transitions
-only).
+LLM movement directives, and LLM-directed pause AND resume (see
+record_pause).
+
+Updated 2026-09-18 (Pause_Redesign_Implementation_Plan.md): the old
+should_pause boolean is gone, replaced by a nullable pause_directive
+("pause" | "resume" | None) - see models.py and llm.py's ROOMBA_STATE_TOOL.
+Resume is now a real, narratable LLM decision, not something with no
+corresponding signal - record_pause below narrates both directions.
+Managed Pause itself has also been redesigned (see the Docs repo's
+Pause_Redesign_Implementation_Plan.md): there is no more auto-pause of any
+kind in Unity, so the LLM directive and the Unity-local debug key are the
+only two ways a pause can start or end. This module still only narrates
+the LLM-directed one - the debug key is invisible to the Orchestrator by
+construction and correctly stays that way.
 
 Explicitly out of scope for v1, per Narrative_Log_Stream_Plan.md section 5:
-WASD/manual-control narration, the four non-LLM-mediated Managed Pause
-entry triggers, and journey "stop"/resolved narration. Resume is not
-narrated at all, for any trigger - should_pause returning to false is not a
-resume signal even for the one pause trigger this module DOES cover (see
-SessionManager.UpdateState's own docstring: "false does nothing"), so there
-is no Orchestrator-visible event marking a pause actually ending.
+WASD/manual-control narration and journey "stop"/resolved narration (the
+latter is now permanent, not just a v1 scoping choice - see the pause
+redesign notes above: a settled/abandoned Journey never itself triggers a
+pause any more, so there's nothing pause-related to narrate at that
+moment).
 
 Phase 2 (not yet implemented): journey_started/journey_distance will need
 Unity to report them on the collision event itself, extending EmotionState -
@@ -51,7 +62,7 @@ def new_story_state():
     """Per-session dedup/transition state - the starting state for a session with nothing narrated yet."""
     return {
         "last_collision_key": None,  # (event_type, entity_id) of the last collision/proximity line actually written
-        "was_paused": False,          # tracks the should_pause transition so "pauses" logs once, not every turn it stays true
+        "was_paused": False,          # tracks pause_directive's effective state so pause/resume each log once per transition, not every turn
     }
 
 
@@ -74,8 +85,8 @@ def open_session_log(session_id):
     # silently make the second session append to the first's file instead
     # of getting its own, defeating the "non-destructive across sessions"
     # requirement this function exists to satisfy.
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    path = os.path.join(STORY_LOG_DIR, f"{session_id}_{timestamp}.log")
+    timestamp = datetime.now(timezone.utc).strftime("%Y.%m.%d-%H.%MZ")
+    path = os.path.join(STORY_LOG_DIR, f"{timestamp}_{session_id}.log")
     return open(path, "a", buffering=1)
 
 
@@ -88,7 +99,7 @@ def write_line(log_file, line):
     """
     Writes one already-rendered narrative line, timestamped, to the given
     session's story log file. A None line (an empty Roomba dialog, a
-    suppressed duplicate collision, a should_pause that isn't a fresh
+    suppressed duplicate collision, a pause_directive that isn't a fresh
     transition, ...) is a no-op - callers pass through whatever a
     render_*/record_* function returned without their own None check first.
     """
@@ -222,27 +233,32 @@ def render_movement_directive(roomba_name, target_name, direction):
     return f"{roomba_name}-LLM directs the roomba to move {towards_or_away} {target_name}."
 
 
-def record_pause(state, roomba_name, should_pause):
+def record_pause(state, roomba_name, pause_directive):
     """
-    Logs a pause only on the False -> True transition, so a personality
-    that keeps returning should_pause=true across several consecutive turns
-    doesn't produce a repeated line every time. Resume is deliberately not
-    handled here at all - see module docstring: should_pause going back to
-    false is not a resume signal (SessionManager.UpdateState treats it as
-    one-directional), and there is no other Orchestrator-visible event for
-    "the pause actually ended" - that's entirely Unity-local (ResumeTimer's
-    quiet period, or the debug key).
+    Logs a pause or resume line only when pause_directive carries a real
+    instruction this turn (not None) AND it actually represents a change
+    from the tracked was_paused state - so a personality that keeps
+    reasserting "pause" (or "resume") turn after turn doesn't produce a
+    repeated line every time.
+
+    Updated 2026-09-18 (Pause_Redesign_Implementation_Plan.md): resume is
+    now a real, narratable LLM decision, unlike the old should_pause
+    boolean this replaces, which had no corresponding signal for "the
+    pause actually ended" at all. The debug key remains the one other way
+    a pause can start or end (see module docstring) and is still not
+    narrated here - it's Unity-local and the Orchestrator has no
+    visibility into it.
 
     Returns (new_state, line_or_None).
     """
-    if should_pause and not state["was_paused"]:
+    if pause_directive == "pause" and not state["was_paused"]:
         new_state = dict(state)
         new_state["was_paused"] = True
         return new_state, f"{roomba_name} pauses."
 
-    if not should_pause and state["was_paused"]:
+    if pause_directive == "resume" and state["was_paused"]:
         new_state = dict(state)
         new_state["was_paused"] = False
-        return new_state, None
+        return new_state, f"{roomba_name} resumes."
 
     return state, None
