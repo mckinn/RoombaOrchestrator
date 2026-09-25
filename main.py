@@ -5,6 +5,8 @@ load_dotenv()
 import os
 import logging
 
+# change to trigger / allow a commit
+
 base_log_level_name = os.getenv("BASE_LOG_LEVEL", "INFO").upper()
 base_log_level = getattr(logging, base_log_level_name, logging.INFO)
 logging.basicConfig(level=base_log_level, format="%(asctime)s [%(levelname)s] %(message)s")
