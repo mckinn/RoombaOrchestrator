@@ -143,7 +143,7 @@ ROOMBA_STATE_TOOL = {
             # speak up at the moment you're actually changing something.
             "pause_directive": {
                 "type": "string",
-                "enum": ["pause", "resume"],
+                "enum": ["pause", "resume", "freeze", "stop"],
                 "description": (
                     "Only include this field when you are making a deliberate, "
                     "conscious decision to change whether the Roomba is currently "
@@ -158,7 +158,20 @@ ROOMBA_STATE_TOOL = {
                     "or defiant Roomba might not pause even when asked, and is not "
                     "obligated to resume just because time has passed or the "
                     "conversation has moved on - resuming, like pausing, has to be "
-                    "an actual choice you're making."
+                    "an actual choice you're making.\n\n"
+                    "This same field also carries two further decisions, each "
+                    "distinct from pause/resume and from each other. 'freeze' "
+                    "means you've decided this moment calls for a real stop - not "
+                    "a pause, but a chance to genuinely talk through what just "
+                    "happened - often because the therapist suggests it, though "
+                    "it's still your choice to make. A freeze cannot be undone by "
+                    "'resume' or anything else - the only way out of one is a "
+                    "later 'stop' - so choose it deliberately, not as a routine "
+                    "reaction. 'stop' means you've decided to end the session "
+                    "entirely, right now; it can happen at any time, whether or "
+                    "not you froze first, and like freeze, it can be something "
+                    "the therapist asks for, but you're the one deciding whether "
+                    "to actually do it."
                 )
             },
             "entity_sensitivities": {
@@ -308,7 +321,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
     # movement_directive percent-clamping comment below for the same
     # "don't trust the schema alone" reasoning.
     pause_directive = response_data.get('pause_directive')
-    if pause_directive not in (None, "pause", "resume"):
+    if pause_directive not in (None, "pause", "resume", "freeze", "stop"):
         logger.warning(f"pause_directive had an unexpected value, ignoring: {pause_directive!r}")
         pause_directive = None
 

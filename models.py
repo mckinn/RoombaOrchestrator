@@ -74,7 +74,15 @@ class TherapyMessageResponse(BaseModel):
     # are both genuine, LLM-originated decisions now; see llm.py's
     # ROOMBA_STATE_TOOL for the prompt-facing description of when each is
     # used.
-    pause_directive: Optional[Literal["pause", "resume"]] = None
+    #
+    # Extended 2026-09-25 (Freeze_And_Stop_Implementation_Plan.md) with
+    # "freeze" and "stop" - two further genuine, LLM-originated decisions,
+    # NOT variations on pause/resume. "freeze" is a one-way latch (there is
+    # no corresponding "unfreeze" - the only way out of a freeze is
+    # "stop"); "stop" ends the session outright and can be issued directly,
+    # with or without a prior "freeze". See ROOMBA_STATE_TOOL for the full
+    # prompt-facing description of all four values.
+    pause_directive: Optional[Literal["pause", "resume", "freeze", "stop"]] = None
     movement_directive: Optional[MovementDirective] = None
 
 
@@ -135,9 +143,10 @@ class ArenaEventResponse(BaseModel):
     dialog: str
     pad: PADState
     entity_sensitivities: List[EntitySensitivity]
-    # See TherapyMessageResponse.pause_directive above - same field,
-    # same "None means no opinion" semantics, same reasoning.
-    pause_directive: Optional[Literal["pause", "resume"]] = None
+    # See TherapyMessageResponse.pause_directive above - same field, same
+    # "None means no opinion" semantics, same reasoning, now including
+    # "freeze"/"stop" too (2026-09-25, Freeze_And_Stop_Implementation_Plan.md).
+    pause_directive: Optional[Literal["pause", "resume", "freeze", "stop"]] = None
     # True for every event type except a collision/proximity_threshold that
     # only updated the aggregation Collector without crossing a threshold -
     # in that case dialog is "" and pad/entity_sensitivities are simply the

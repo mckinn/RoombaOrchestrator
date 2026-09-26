@@ -35,6 +35,10 @@ only two ways a pause can start or end. This module still only narrates
 the LLM-directed one - the debug key is invisible to the Orchestrator by
 construction and correctly stays that way.
 
+Extended 2026-09-25 (Freeze_And_Stop_Implementation_Plan.md): pause_directive
+can now also carry "freeze" and "stop", both narrated by record_pause below -
+see that function's own docstring for how they differ from pause/resume.
+
 Explicitly out of scope for v1, per Narrative_Log_Stream_Plan.md section 5:
 WASD/manual-control narration and journey "stop"/resolved narration (the
 latter is now permanent, not just a v1 scoping choice - see the pause
@@ -63,6 +67,8 @@ def new_story_state():
     return {
         "last_collision_key": None,  # (event_type, entity_id) of the last collision/proximity line actually written
         "was_paused": False,          # tracks pause_directive's effective state so pause/resume each log once per transition, not every turn
+        "was_frozen": False,          # one-way - True once a "freeze" pause_directive has been narrated; never reset (Freeze_And_Stop_Implementation_Plan.md)
+        "was_stopped": False,         # one-way - True once a "stop" pause_directive has been narrated; never reset (Freeze_And_Stop_Implementation_Plan.md)
     }
 
 
@@ -235,19 +241,30 @@ def render_movement_directive(roomba_name, target_name, direction):
 
 def record_pause(state, roomba_name, pause_directive):
     """
-    Logs a pause or resume line only when pause_directive carries a real
-    instruction this turn (not None) AND it actually represents a change
-    from the tracked was_paused state - so a personality that keeps
-    reasserting "pause" (or "resume") turn after turn doesn't produce a
-    repeated line every time.
+    Logs a pause/resume/freeze/stop line only when pause_directive carries a
+    real instruction this turn (not None) AND it actually represents a
+    change from the tracked state - so a personality that keeps reasserting
+    the same directive turn after turn doesn't produce a repeated line
+    every time.
 
     Updated 2026-09-18 (Pause_Redesign_Implementation_Plan.md): resume is
     now a real, narratable LLM decision, unlike the old should_pause
     boolean this replaces, which had no corresponding signal for "the
-    pause actually ended" at all. The debug key remains the one other way
-    a pause can start or end (see module docstring) and is still not
+    pause actually ended" at all. The debug key remains one other way a
+    pause can start or end (see module docstring) and is still not
     narrated here - it's Unity-local and the Orchestrator has no
-    visibility into it.
+    visibility into it. The same is true of Unity's own Shift+Escape debug
+    Stop trigger (Freeze_And_Stop_Implementation_Plan.md) - it never
+    reaches the Orchestrator at all, so there's nothing to narrate for it
+    here.
+
+    Extended 2026-09-25 (Freeze_And_Stop_Implementation_Plan.md) with
+    "freeze" and "stop". Both are one-way, unlike pause/resume: was_frozen
+    and was_stopped only ever go False -> True, so there's no
+    corresponding "unfreeze"/"unstop" transition to guard against - a
+    repeat "freeze" once already frozen, or "stop" once already stopped,
+    is treated the same as a repeat "pause"/"resume": not a fresh
+    transition, so no second line.
 
     Returns (new_state, line_or_None).
     """
@@ -260,5 +277,15 @@ def record_pause(state, roomba_name, pause_directive):
         new_state = dict(state)
         new_state["was_paused"] = False
         return new_state, f"{roomba_name} resumes."
+
+    if pause_directive == "freeze" and not state["was_frozen"]:
+        new_state = dict(state)
+        new_state["was_frozen"] = True
+        return new_state, f"{roomba_name} freezes - motion stops, but the conversation continues."
+
+    if pause_directive == "stop" and not state["was_stopped"]:
+        new_state = dict(state)
+        new_state["was_stopped"] = True
+        return new_state, f"{roomba_name}'s session ends."
 
     return state, None
