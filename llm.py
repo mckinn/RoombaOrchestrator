@@ -260,10 +260,12 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         + "\n\n" + build_current_state_context(current_pad, current_entity_sensitivities, known_entity_roster)
     )
 
+    logger.debug(f"\nLLM call - full system prompt:\n {full_system_prompt!r}\n\n")
+
     outgoing_turn = conversation_history[-1] if conversation_history else None
     logger.debug(f"LLM call - sending: {outgoing_turn!r}")
     logger.debug(f"LLM call - sending current_pad: {current_pad!r}")
-    logger.debug(f"LLM call - sending current_entity_sensitivities: {current_entity_sensitivities!r}")
+    logger.debug(f"LLM call - sending current_entity_sensitivities: {current_entity_sensitivities!r}\n\n")
     # Added 2026-09-13: the roster is the ONLY thing that determines which
     # target_name values are even choosable for a movement_directive this
     # turn (see build_current_state_context / ROOMBA_STATE_TOOL), but
@@ -273,7 +275,8 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
     # what it was actually offered - e.g. whether the entity currently
     # colliding was even present, and where it ranked (list_entries sorts
     # most-recently-encountered first).
-    logger.debug(f"LLM call - roster offered: {known_entity_roster!r}")
+
+    # logger.debug(f"LLM call - roster offered: {known_entity_roster!r}")
 
     try:
         message = client.messages.create(
@@ -302,9 +305,9 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         # is a genuine tri-state (see models.py's TherapyMessageResponse).
         return dialog, pad, [], None, None
 
-    logger.debug(f"LLM call - response - tool_use_block {tool_use_block}")
+    logger.debug(f"LLM call - response - tool_use_block {tool_use_block}\n\n")
     response_data = tool_use_block.input
-    logger.debug(f"LLM call - received tool input {response_data!r}")
+    logger.debug(f"LLM call - received tool input {response_data!r}\n\n")
 
     try:
         dialog = response_data['dialog']

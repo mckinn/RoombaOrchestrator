@@ -264,7 +264,7 @@ def arena_event(request: ArenaEventRequest):
             )
         else:
             event_prose = (
-                f"{roomba_name} pauses mid-clean, having collected "
+                f"{roomba_name} realizes that they have collected "
                 f"about {request.percent_complete:.0f}% of the reachable dirt so far."
             )
 
@@ -317,7 +317,7 @@ def arena_event(request: ArenaEventRequest):
     # narratively meaningful value.
     merge_entity_sensitivities(session, request.emotion_states, seed_new_at_zero=False)
 
-    if request.event_type in AGGREGATED_EVENT_TYPES:
+    if request.event_type in AGGREGATED_EVENT_TYPES: # collision, proximity (not implemented)
         # Every event here feeds the Collector; only a threshold crossing
         # produces a report and an LLM turn. See Planning_Autonomous_Movement.md,
         # Aggregation Model - this replaces the old unconditional
