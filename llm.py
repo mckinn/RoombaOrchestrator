@@ -8,6 +8,7 @@ else in the Orchestrator goes through.
 
 import logging
 import json
+import os
 
 import anthropic
 from fastapi import HTTPException
@@ -17,6 +18,21 @@ from models import PADState, EntitySensitivity
 logger = logging.getLogger("roomba_orchestrator")
 
 client = anthropic.Anthropic()
+
+# Debug-only instrumentation, added 2026-10-04 in response to Steve's "how do
+# I see the LLM's thinking" question - see learnings-and-decisions.md. Off by
+# default: the `reasoning` property build_roomba_state_tool() adds below, and
+# the parsing of it in call_llm(), only happen when this is truthy. This is
+# NOT Anthropic's native extended-thinking feature - that's flatly
+# incompatible with the forced tool_choice this module relies on (manual
+# extended thinking only permits tool_choice "auto"/"none"; the model this
+# module calls doesn't support the adaptive-thinking mode that would allow
+# otherwise). Instead this asks the model to narrate its own reasoning as an
+# ordinary schema field on the same forced tool call it already has to make.
+# Toggled by restarting the process with the env var set - not a live
+# per-session switch - so ordinary play pays zero extra tokens/latency, same
+# convention as STORY_LOG_DIR in story_log.py.
+DEBUG_LLM_REASONING = os.getenv("DEBUG_LLM_REASONING", "false").lower() in ("1", "true", "yes")
 
 # Paired with event_prose.render_report_facts() - Sequenced Plan Step 4's
 # resolved design (2026-09-08, Planning_Autonomous_Movement.md, Aggregation
@@ -104,12 +120,12 @@ MOVEMENT_AGENCY_GUIDANCE = (
     "that."
 )
 
-ROOMBA_STATE_TOOL = {
-    "name": "report_roomba_state",
-    "description": "Report the Roomba's spoken line, updated emotional state, any deliberate pause/resume decision, and any entity sensitivity changes for this turn.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
+# Only the fixed, always-present fields - see build_roomba_state_tool() just
+# below, which is what call_llm() actually calls. Kept as a module-level
+# dict rather than inlined in the function body so the bulk of the schema
+# still reads top-to-bottom like before this change, with only the
+# debug-only reasoning field assembled conditionally.
+_ROOMBA_STATE_TOOL_BASE_PROPERTIES = {
             "dialog": {
                 "type": "string",
                 "description": "What the Roomba says out loud, in character, based on everything that has happened so far. Keep it brief - under 25 words."
@@ -217,10 +233,55 @@ ROOMBA_STATE_TOOL = {
                 },
                 "required": ["target_name", "direction", "percent"]
             }
-        },
-        "required": ["dialog", "pad"]
-    }
 }
+
+# Only present when DEBUG_LLM_REASONING is on (see that constant's own
+# comment above) - deliberately not length-constrained the way dialog is;
+# Steve's framing was "as detailed as necessary for the LLM to explain how
+# it made up its mind."
+_REASONING_PROPERTY = {
+    "type": "string",
+    "description": (
+        "Only present because you're being asked to explain your own "
+        "decision-making for debugging purposes - this has no bearing on "
+        "the Roomba's character or the therapist's experience, and is "
+        "never shown to the therapist. Explain, in plain terms, how you "
+        "arrived at everything else in this response: which specific "
+        "pieces of information you were given (the system prompt's "
+        "guidance, your current PAD state, your entity sensitivities, the "
+        "roster, prior conversation) mattered most to your dialog/pad/"
+        "pause_directive/entity_sensitivities/movement_directive decisions "
+        "this turn, and which pieces of information you were given turned "
+        "out to be irrelevant or went unused. Be as detailed as you need "
+        "to be - unlike dialog, there is no length limit here."
+    )
+}
+
+
+def build_roomba_state_tool():
+    """
+    Builds the report_roomba_state tool schema fresh on every call rather
+    than once at module load, so DEBUG_LLM_REASONING can be read at call
+    time (tests flip it via monkeypatch/env without needing to reimport
+    this module) and so the `reasoning` property genuinely never reaches
+    Anthropic - not just unused - when the toggle is off.
+    """
+    properties = dict(_ROOMBA_STATE_TOOL_BASE_PROPERTIES)
+    required = ["dialog", "pad"]
+
+    if DEBUG_LLM_REASONING:
+        properties["reasoning"] = _REASONING_PROPERTY
+        required.append("reasoning")
+
+    return {
+        "name": "report_roomba_state",
+        "description": "Report the Roomba's spoken line, updated emotional state, any deliberate pause/resume decision, and any entity sensitivity changes for this turn.",
+        "input_schema": {
+            "type": "object",
+            "properties": properties,
+            "required": required
+        }
+    }
 
 
 def build_current_state_context(pad, entity_sensitivities, known_entity_roster=None):
@@ -284,7 +345,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
             max_tokens=1024,
             system=full_system_prompt,
             messages=conversation_history,
-            tools=[ROOMBA_STATE_TOOL],
+            tools=[build_roomba_state_tool()],
             tool_choice={"type": "tool", "name": "report_roomba_state"}
         )
     except anthropic.APIError as e:
@@ -303,7 +364,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         # No LLM turn actually happened, so there's no opinion to report -
         # None (not "false") is the correct default now that pause_directive
         # is a genuine tri-state (see models.py's TherapyMessageResponse).
-        return dialog, pad, [], None, None
+        return dialog, pad, [], None, None, None
 
     logger.debug(f"LLM call - response - tool_use_block {tool_use_block}\n\n")
     response_data = tool_use_block.input
@@ -316,7 +377,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         logger.warning(f"Tool input missing dialog/pad despite schema, raw: {response_data!r} ({e})")
         dialog = "..."
         pad = PADState(pleasure=0.0, arousal=0.0, dominance=0.0)
-        return dialog, pad, [], None, None
+        return dialog, pad, [], None, None, None
 
     # None if omitted (the normal case on most turns) or if the model
     # returned something outside the schema's enum despite tool-use
@@ -371,4 +432,11 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         except (KeyError, TypeError, ValueError) as e:
             logger.warning(f"movement_directive parse failed, raw: {raw!r} ({e})")
 
-    return dialog, pad, entity_sensitivity_updates, pause_directive, raw_movement_directive
+    # Only ever non-None when DEBUG_LLM_REASONING is on - the property isn't
+    # in the schema otherwise, so response_data.get() finds nothing to read.
+    # No defensive type-check beyond .get() needed: the schema constrains it
+    # to a string, and an unexpected non-string here would just be passed
+    # through to story_log.render_reasoning(), which only checks truthiness.
+    reasoning = response_data.get('reasoning')
+
+    return dialog, pad, entity_sensitivity_updates, pause_directive, raw_movement_directive, reasoning

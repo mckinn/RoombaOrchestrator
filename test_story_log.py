@@ -143,6 +143,20 @@ def scenario_movement_directive_wording():
     check("movement directive: further -> away from", further == "Dusty-LLM directs the roomba to move away from chair-01.")
 
 
+# Added alongside DEBUG_LLM_REASONING (see llm.py) - render_reasoning only
+# ever gets called with a real string when the Orchestrator is running with
+# that toggle on, but it's defensive about None/empty regardless, same
+# convention as render_roomba_dialog's empty-dialog check above.
+def scenario_render_reasoning_skips_falsy_values():
+    check("reasoning: None -> None", story_log.render_reasoning("Dusty", None) is None)
+    check("reasoning: empty string -> None", story_log.render_reasoning("Dusty", "") is None)
+    check(
+        "reasoning: non-empty -> prefixed line",
+        story_log.render_reasoning("Dusty", "the couch mention outweighed the calm PAD state")
+        == "[DEBUG REASONING] Dusty: the couch mention outweighed the calm PAD state",
+    )
+
+
 # Updated 2026-09-18 (Pause_Redesign_Implementation_Plan.md): record_pause's
 # third argument is now the nullable pause_directive ("pause" | "resume" |
 # None), not the old should_pause boolean - these scenarios exercise the
@@ -244,6 +258,7 @@ def main():
     scenario_pattern_report_falls_back_to_entity_id_if_not_on_roster()
     scenario_pattern_report_all_instances_and_rollup()
     scenario_movement_directive_wording()
+    scenario_render_reasoning_skips_falsy_values()
     scenario_pause_transition_logs_once()
     scenario_resume_after_pause_logs_and_transitions_back()
     scenario_no_opinion_and_redundant_directives_are_noops()

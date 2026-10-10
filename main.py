@@ -83,13 +83,14 @@ def resolve_movement_directive(session, raw_directive):
     )
 
 
-def _log_llm_turn(session, dialog, pause_directive, raw_directive):
+def _log_llm_turn(session, dialog, pause_directive, raw_directive, reasoning=None):
     """
     Shared choke point for narrating whatever came back from an LLM turn -
-    Roomba dialog, a pause/resume transition, and a movement directive (in
-    that order) - to the session's story log. Every call_llm() call site in
-    this file funnels through here so the narration logic lives in exactly
-    one place. See story_log.py and Narrative_Log_Stream_Plan.md.
+    Roomba dialog, a pause/resume transition, a movement directive, and
+    (debug-only) the LLM's self-reported reasoning - to the session's story
+    log. Every call_llm() call site in this file funnels through here so
+    the narration logic lives in exactly one place. See story_log.py and
+    Narrative_Log_Stream_Plan.md.
     """
     roomba_name = session['personality']['name']
     log_file = session['story_log_file']
@@ -104,6 +105,13 @@ def _log_llm_turn(session, dialog, pause_directive, raw_directive):
             log_file,
             story_log.render_movement_directive(roomba_name, raw_directive['target_name'], raw_directive['direction'])
         )
+
+    # reasoning is None on every turn unless the Orchestrator is running
+    # with DEBUG_LLM_REASONING on (see llm.py) - render_reasoning() itself
+    # also no-ops on a falsy value, so this is belt-and-suspenders, not
+    # load-bearing.
+    if reasoning is not None:
+        story_log.write_line(log_file, story_log.render_reasoning(roomba_name, reasoning))
 
 
 @app.get("/health", description="are you alive?")
@@ -174,7 +182,7 @@ def therapy_message(request: TherapyMessageRequest):
     })
     story_log.write_line(session['story_log_file'], story_log.render_therapist_dialog(request.message))
 
-    dialog, pad, entity_sensitivity_updates, pause_directive, raw_directive = call_llm(
+    dialog, pad, entity_sensitivity_updates, pause_directive, raw_directive, reasoning = call_llm(
         session['personality']['system_prompt'],
         session['conversation_history'],
         session['pad'],
@@ -189,7 +197,7 @@ def therapy_message(request: TherapyMessageRequest):
 
     session['pad'] = pad
     merge_entity_sensitivities(session, entity_sensitivity_updates)
-    _log_llm_turn(session, dialog, pause_directive, raw_directive)
+    _log_llm_turn(session, dialog, pause_directive, raw_directive, reasoning)
 
     return TherapyMessageResponse(
         dialog=dialog,
@@ -276,7 +284,7 @@ def arena_event(request: ArenaEventRequest):
             "content": event_prose
         })
 
-        dialog, pad, entity_sensitivity_updates, pause_directive, raw_directive = call_llm(
+        dialog, pad, entity_sensitivity_updates, pause_directive, raw_directive, reasoning = call_llm(
             session['personality']['system_prompt'],
             session['conversation_history'],
             session['pad'],
@@ -291,7 +299,7 @@ def arena_event(request: ArenaEventRequest):
 
         session['pad'] = pad
         merge_entity_sensitivities(session, entity_sensitivity_updates)
-        _log_llm_turn(session, dialog, pause_directive, raw_directive)
+        _log_llm_turn(session, dialog, pause_directive, raw_directive, reasoning)
 
         return ArenaEventResponse(
             dialog=dialog,
@@ -424,7 +432,7 @@ def arena_event(request: ArenaEventRequest):
         "content": event_prose
     })
 
-    dialog, pad, entity_sensitivity_updates, pause_directive, raw_directive = call_llm(
+    dialog, pad, entity_sensitivity_updates, pause_directive, raw_directive, reasoning = call_llm(
         session['personality']['system_prompt'],
         session['conversation_history'],
         session['pad'],
@@ -443,7 +451,7 @@ def arena_event(request: ArenaEventRequest):
     # New types the LLM introduces (not seen in Unity's report at all) keep their
     # actual stated value - a deliberate narrative report, unlike Unity's raw contact.
     merge_entity_sensitivities(session, entity_sensitivity_updates)
-    _log_llm_turn(session, dialog, pause_directive, raw_directive)
+    _log_llm_turn(session, dialog, pause_directive, raw_directive, reasoning)
 
     return ArenaEventResponse(
         dialog=dialog,

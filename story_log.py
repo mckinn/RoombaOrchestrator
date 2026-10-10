@@ -208,28 +208,33 @@ def render_pattern_report(roomba_name, report, roster):
     triggered_by = report["triggered_by"]
     lines = []
 
+    trigger_count = 1
+
     if triggered_by["same_instance"]:
         max_instance = report["max_instance"]
         entry = roster["entries"].get(max_instance["entity_id"])
         name = entry["name"] if entry is not None else max_instance["entity_id"]
         lines.append(
             f"{roomba_name} collided with {name} {max_instance['collision_count']} "
-            f"times and the LLM was informed."
+            f"times and the LLM was informed. ({trigger_count})"
         )
+        trigger_count =+ 1
 
     if triggered_by["all_instances"]:
         total_collisions = report["total_collisions"]
         lines.append(
             f"{roomba_name} has collided with {total_collisions['collision_count']} "
-            f"different {entity_type}s and the LLM was informed."
+            f"different {entity_type}s and the LLM was informed. ({trigger_count})"
         )
+        trigger_count =+ 1
 
     if triggered_by["rollup"]:
         rollup = report["rollup"]
         lines.append(
             f"{roomba_name}'s {rollup['emotion']} feelings about {entity_type} "
-            f"have been building up and the LLM was informed."
+            f"have been building up and the LLM was informed. ({trigger_count})"
         )
+        trigger_count =+ 1
 
     return lines
 
@@ -237,6 +242,21 @@ def render_pattern_report(roomba_name, report, roster):
 def render_movement_directive(roomba_name, target_name, direction):
     towards_or_away = "towards" if direction == "closer" else "away from"
     return f"{roomba_name}-LLM directs the roomba to move {towards_or_away} {target_name}."
+
+
+def render_reasoning(roomba_name, reasoning):
+    """
+    Renders the LLM's self-reported decision-making explanation, only ever
+    present when the Orchestrator is running with DEBUG_LLM_REASONING on
+    (see llm.py). The "[DEBUG REASONING]" prefix is deliberate - unlike
+    every other line in this file, this one isn't part of the
+    narrated-for-a-curious-reader story the log otherwise tells, so it
+    needs to visually (and grep-ably) stand apart from it rather than
+    blend in as if it were another narrated beat.
+    """
+    if not reasoning:
+        return None
+    return f"[DEBUG REASONING] {roomba_name}: {reasoning}"
 
 
 def record_pause(state, roomba_name, pause_directive):
