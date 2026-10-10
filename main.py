@@ -5,6 +5,8 @@ load_dotenv()
 import os
 import logging
 
+# change to trigger / allow a commit
+
 base_log_level_name = os.getenv("BASE_LOG_LEVEL", "INFO").upper()
 base_log_level = getattr(logging, base_log_level_name, logging.INFO)
 logging.basicConfig(level=base_log_level, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -42,6 +44,7 @@ from llm import call_llm
 from session_state import sessions, merge_entity_sensitivities
 import event_aggregation
 import entity_roster
+import story_log
 
 # Event types that always carry populated emotion_states and are routed
 # through the Collector instead of being reported to the LLM unconditionally
@@ -80,6 +83,37 @@ def resolve_movement_directive(session, raw_directive):
     )
 
 
+def _log_llm_turn(session, dialog, pause_directive, raw_directive, reasoning=None):
+    """
+    Shared choke point for narrating whatever came back from an LLM turn -
+    Roomba dialog, a pause/resume transition, a movement directive, and
+    (debug-only) the LLM's self-reported reasoning - to the session's story
+    log. Every call_llm() call site in this file funnels through here so
+    the narration logic lives in exactly one place. See story_log.py and
+    Narrative_Log_Stream_Plan.md.
+    """
+    roomba_name = session['personality']['name']
+    log_file = session['story_log_file']
+
+    story_log.write_line(log_file, story_log.render_roomba_dialog(roomba_name, dialog))
+
+    session['story_state'], pause_line = story_log.record_pause(session['story_state'], roomba_name, pause_directive)
+    story_log.write_line(log_file, pause_line)
+
+    if raw_directive is not None:
+        story_log.write_line(
+            log_file,
+            story_log.render_movement_directive(roomba_name, raw_directive['target_name'], raw_directive['direction'])
+        )
+
+    # reasoning is None on every turn unless the Orchestrator is running
+    # with DEBUG_LLM_REASONING on (see llm.py) - render_reasoning() itself
+    # also no-ops on a falsy value, so this is belt-and-suspenders, not
+    # load-bearing.
+    if reasoning is not None:
+        story_log.write_line(log_file, story_log.render_reasoning(roomba_name, reasoning))
+
+
 @app.get("/health", description="are you alive?")
 def health_check():
     return {"status": "ok"}
@@ -115,7 +149,15 @@ def start_session(request: StartSessionRequest):
         # Planning_Autonomous_Movement.md Parking Lot. Populated only from
         # `collision` events in /arena/event, never from arena_manifest.
         "entity_roster": entity_roster.new_roster(),
+        # The narrative "story" log - see story_log.py and
+        # Narrative_Log_Stream_Plan.md. A separate concern from the
+        # `logger` used throughout this file: never mixed into the same
+        # stream, and scoped to its own file per session.
+        "story_state": story_log.new_story_state(),
+        "story_log_file": story_log.open_session_log(session_id),
     }
+
+    story_log.write_line(sessions[session_id]["story_log_file"], story_log.render_session_start(personality['name']))
 
     return StartSessionResponse(
         session_id=session_id,
@@ -138,8 +180,9 @@ def therapy_message(request: TherapyMessageRequest):
         "role": "user",
         "content": request.message
     })
+    story_log.write_line(session['story_log_file'], story_log.render_therapist_dialog(request.message))
 
-    dialog, pad, entity_sensitivity_updates, should_pause, raw_directive = call_llm(
+    dialog, pad, entity_sensitivity_updates, pause_directive, raw_directive, reasoning = call_llm(
         session['personality']['system_prompt'],
         session['conversation_history'],
         session['pad'],
@@ -154,12 +197,13 @@ def therapy_message(request: TherapyMessageRequest):
 
     session['pad'] = pad
     merge_entity_sensitivities(session, entity_sensitivity_updates)
+    _log_llm_turn(session, dialog, pause_directive, raw_directive, reasoning)
 
     return TherapyMessageResponse(
         dialog=dialog,
         pad=pad,
         entity_sensitivities=[EntitySensitivity(**s) for s in session['entity_sensitivities']],
-        should_pause=should_pause,
+        pause_directive=pause_directive,
         movement_directive=resolve_movement_directive(session, raw_directive)
     )
 
@@ -228,18 +272,19 @@ def arena_event(request: ArenaEventRequest):
             )
         else:
             event_prose = (
-                f"{roomba_name} pauses mid-clean, having collected "
+                f"{roomba_name} realizes that they have collected "
                 f"about {request.percent_complete:.0f}% of the reachable dirt so far."
             )
 
         prior_entity_sensitivities = [dict(s) for s in session['entity_sensitivities']]
+        story_log.write_line(session['story_log_file'], story_log.render_passthrough(event_prose))
 
         session['conversation_history'].append({
             "role": "user",
             "content": event_prose
         })
 
-        dialog, pad, entity_sensitivity_updates, should_pause, raw_directive = call_llm(
+        dialog, pad, entity_sensitivity_updates, pause_directive, raw_directive, reasoning = call_llm(
             session['personality']['system_prompt'],
             session['conversation_history'],
             session['pad'],
@@ -254,12 +299,13 @@ def arena_event(request: ArenaEventRequest):
 
         session['pad'] = pad
         merge_entity_sensitivities(session, entity_sensitivity_updates)
+        _log_llm_turn(session, dialog, pause_directive, raw_directive, reasoning)
 
         return ArenaEventResponse(
             dialog=dialog,
             pad=pad,
             entity_sensitivities=[EntitySensitivity(**s) for s in session['entity_sensitivities']],
-            should_pause=should_pause,
+            pause_directive=pause_directive,
             movement_directive=resolve_movement_directive(session, raw_directive)
         )
 
@@ -268,7 +314,7 @@ def arena_event(request: ArenaEventRequest):
     # aggregation threshold below - that's a separate concern (see
     # Planning_Autonomous_Movement.md, Aggregation Model). Aggregation here
     # is simple replacement - the newest reported strength/emotion for a
-    # given entity_type overwrites whatever was there (see BACKLOG.md #8).
+    # given entity_type overwrites whatever was there (see the JIRA backlog).
     #
     # I believe the comment below to be incorrect - the initial sensitivity is
     # seeded by the game as 'ambivalence' - this part needs deeper thought.
@@ -279,7 +325,7 @@ def arena_event(request: ArenaEventRequest):
     # narratively meaningful value.
     merge_entity_sensitivities(session, request.emotion_states, seed_new_at_zero=False)
 
-    if request.event_type in AGGREGATED_EVENT_TYPES:
+    if request.event_type in AGGREGATED_EVENT_TYPES: # collision, proximity (not implemented)
         # Every event here feeds the Collector; only a threshold crossing
         # produces a report and an LLM turn. See Planning_Autonomous_Movement.md,
         # Aggregation Model - this replaces the old unconditional
@@ -314,6 +360,24 @@ def arena_event(request: ArenaEventRequest):
             session['collector'], es_report = event_aggregation.record_event(
                 session['collector'], es.entity_type, es.entity_id, es.emotion, es.strength, now
             )
+            # Narrated regardless of whether this event goes on to cross an
+            # aggregation threshold below - that's what gives the story log
+            # its own "first contact" beat for an entity even on turns that
+            # don't produce an LLM call. journey_started/journey_distance are
+            # Phase 2 fields (Narrative_Log_Stream_Plan.md section 6) -
+            # Unity populates them only for a "collision" event_type where
+            # JourneyCalculator actually created/refreshed a Journey; for
+            # every other case they're at EmotionState's defaults
+            # (False/None), which record_collision_or_proximity treats as
+            # "no journey" and renders the plain "collides with"/"senses"
+            # line, same as Phase 1.
+            session['story_state'], story_line = story_log.record_collision_or_proximity(
+                session['story_state'], request.event_type, session['personality']['name'],
+                es.entity_type, es.entity_id,
+                journey_started=es.journey_started, journey_emotion=es.emotion,
+                journey_distance=es.journey_distance,
+            )
+            story_log.write_line(session['story_log_file'], story_line)
             if es_report is not None:
                 # Unity sends exactly one EmotionState per event today (see
                 # Planning_Autonomous_Movement.md's Unity-source
@@ -331,7 +395,7 @@ def arena_event(request: ArenaEventRequest):
                 dialog="",
                 pad=session['pad'],
                 entity_sensitivities=[EntitySensitivity(**s) for s in session['entity_sensitivities']],
-                should_pause=False,
+                pause_directive=None,  # no LLM turn happened - no opinion exists
                 flushed=False,
             )
 
@@ -340,11 +404,14 @@ def arena_event(request: ArenaEventRequest):
         prior_entity_sensitivities = [dict(s) for s in session['entity_sensitivities']]
         event_prose = render_report_facts(report)
 
+        for pattern_line in story_log.render_pattern_report(session['personality']['name'], report, session['entity_roster']):
+            story_log.write_line(session['story_log_file'], pattern_line)
+
         logger.debug(f"LLM call - sending event prose: {event_prose!r}")
 
     else:
         # enter / boundary_encountered are out of the Collector's scope -
-        # they can have empty emotion_states (BACKLOG.md #10) and aren't
+        # they can have empty emotion_states (see the JIRA backlog) and aren't
         # the noisy/repetitive event types this aggregation work targets -
         # so they're still reported to the LLM unconditionally, unchanged
         # from before this change.
@@ -358,12 +425,14 @@ def arena_event(request: ArenaEventRequest):
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
 
+        story_log.write_line(session['story_log_file'], story_log.render_passthrough(event_prose))
+
     session['conversation_history'].append({
         "role": "user",
         "content": event_prose
     })
 
-    dialog, pad, entity_sensitivity_updates, should_pause, raw_directive = call_llm(
+    dialog, pad, entity_sensitivity_updates, pause_directive, raw_directive, reasoning = call_llm(
         session['personality']['system_prompt'],
         session['conversation_history'],
         session['pad'],
@@ -382,12 +451,13 @@ def arena_event(request: ArenaEventRequest):
     # New types the LLM introduces (not seen in Unity's report at all) keep their
     # actual stated value - a deliberate narrative report, unlike Unity's raw contact.
     merge_entity_sensitivities(session, entity_sensitivity_updates)
+    _log_llm_turn(session, dialog, pause_directive, raw_directive, reasoning)
 
     return ArenaEventResponse(
         dialog=dialog,
         pad=pad,
         entity_sensitivities=[EntitySensitivity(**s) for s in session['entity_sensitivities']],
-        should_pause=should_pause,
+        pause_directive=pause_directive,
         movement_directive=resolve_movement_directive(session, raw_directive)
     )
 
@@ -400,6 +470,7 @@ def end_session(request: EndSessionRequest):
         raise HTTPException(status_code=404, detail=f"Session '{request.session_id}' not found")
 
     message_count = len(session['conversation_history'])
+    story_log.close_session_log(session.get('story_log_file'))
     del sessions[request.session_id]
 
     return EndSessionResponse(

@@ -67,7 +67,22 @@ class TherapyMessageResponse(BaseModel):
     dialog: str
     pad: PADState
     entity_sensitivities: List[EntitySensitivity] = []
-    should_pause: bool = False
+    # Replaces the old one-directional should_pause: bool (2026-09-18 -
+    # Pause_Redesign_Implementation_Plan.md). None means "no opinion this
+    # turn, leave pause state exactly as it is" - it is not equivalent to
+    # either "false" or "resume" from the old field. "pause" and "resume"
+    # are both genuine, LLM-originated decisions now; see llm.py's
+    # ROOMBA_STATE_TOOL for the prompt-facing description of when each is
+    # used.
+    #
+    # Extended 2026-09-25 (Freeze_And_Stop_Implementation_Plan.md) with
+    # "freeze" and "stop" - two further genuine, LLM-originated decisions,
+    # NOT variations on pause/resume. "freeze" is a one-way latch (there is
+    # no corresponding "unfreeze" - the only way out of a freeze is
+    # "stop"); "stop" ends the session outright and can be issued directly,
+    # with or without a prior "freeze". See ROOMBA_STATE_TOOL for the full
+    # prompt-facing description of all four values.
+    pause_directive: Optional[Literal["pause", "resume", "freeze", "stop"]] = None
     movement_directive: Optional[MovementDirective] = None
 
 
@@ -104,6 +119,15 @@ class EmotionState(BaseModel):
     entity_type: str
     emotion: str
     strength: float
+    # Phase 2 (Narrative_Log_Stream_Plan.md section 6): populated by Unity's
+    # CollisionController only for a "collision" event_type where
+    # JourneyCalculator actually created/refreshed a Journey for this entity
+    # (i.e. the entity's sensitivity was known and not "none" - see
+    # JourneyCalculator.HandleEntityCollision). Left at their defaults for
+    # every other event_type/case, which story_log.record_collision_or_proximity
+    # treats as "no journey started" and renders the plain narration line.
+    journey_started: bool = False
+    journey_distance: Optional[float] = None
 
 
 class ArenaEventRequest(BaseModel):
@@ -119,7 +143,10 @@ class ArenaEventResponse(BaseModel):
     dialog: str
     pad: PADState
     entity_sensitivities: List[EntitySensitivity]
-    should_pause: bool = False
+    # See TherapyMessageResponse.pause_directive above - same field, same
+    # "None means no opinion" semantics, same reasoning, now including
+    # "freeze"/"stop" too (2026-09-25, Freeze_And_Stop_Implementation_Plan.md).
+    pause_directive: Optional[Literal["pause", "resume", "freeze", "stop"]] = None
     # True for every event type except a collision/proximity_threshold that
     # only updated the aggregation Collector without crossing a threshold -
     # in that case dialog is "" and pad/entity_sensitivities are simply the

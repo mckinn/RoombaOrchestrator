@@ -2,8 +2,8 @@ import logging
 
 """
 Owns the in-memory session store and the logic for merging entity_sensitivity
-updates into a session. See BACKLOG.md #14 (no persistence/locking - known,
-accepted) and #8 (merge is pure overwrite - known, accepted for now).
+updates into a session. See the JIRA backlog for the known/accepted gaps
+here - no persistence/locking, and merge being a pure overwrite.
 """
 
 logger = logging.getLogger("roomba_orchestrator")

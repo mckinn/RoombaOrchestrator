@@ -7,6 +7,8 @@ else in the Orchestrator goes through.
 """
 
 import logging
+import json
+import os
 
 import anthropic
 from fastapi import HTTPException
@@ -16,6 +18,21 @@ from models import PADState, EntitySensitivity
 logger = logging.getLogger("roomba_orchestrator")
 
 client = anthropic.Anthropic()
+
+# Debug-only instrumentation, added 2026-10-04 in response to Steve's "how do
+# I see the LLM's thinking" question - see learnings-and-decisions.md. Off by
+# default: the `reasoning` property build_roomba_state_tool() adds below, and
+# the parsing of it in call_llm(), only happen when this is truthy. This is
+# NOT Anthropic's native extended-thinking feature - that's flatly
+# incompatible with the forced tool_choice this module relies on (manual
+# extended thinking only permits tool_choice "auto"/"none"; the model this
+# module calls doesn't support the adaptive-thinking mode that would allow
+# otherwise). Instead this asks the model to narrate its own reasoning as an
+# ordinary schema field on the same forced tool call it already has to make.
+# Toggled by restarting the process with the env var set - not a live
+# per-session switch - so ordinary play pays zero extra tokens/latency, same
+# convention as STORY_LOG_DIR in story_log.py.
+DEBUG_LLM_REASONING = os.getenv("DEBUG_LLM_REASONING", "false").lower() in ("1", "true", "yes")
 
 # Paired with event_prose.render_report_facts() - Sequenced Plan Step 4's
 # resolved design (2026-09-08, Planning_Autonomous_Movement.md, Aggregation
@@ -103,12 +120,12 @@ MOVEMENT_AGENCY_GUIDANCE = (
     "that."
 )
 
-ROOMBA_STATE_TOOL = {
-    "name": "report_roomba_state",
-    "description": "Report the Roomba's spoken line, updated emotional state, whether it should pause, and any entity sensitivity changes for this turn.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
+# Only the fixed, always-present fields - see build_roomba_state_tool() just
+# below, which is what call_llm() actually calls. Kept as a module-level
+# dict rather than inlined in the function body so the bulk of the schema
+# still reads top-to-bottom like before this change, with only the
+# debug-only reasoning field assembled conditionally.
+_ROOMBA_STATE_TOOL_BASE_PROPERTIES = {
             "dialog": {
                 "type": "string",
                 "description": "What the Roomba says out loud, in character, based on everything that has happened so far. Keep it brief - under 25 words."
@@ -132,9 +149,46 @@ ROOMBA_STATE_TOOL = {
                 },
                 "required": ["pleasure", "arousal", "dominance"]
             },
-            "should_pause": {
-                "type": "boolean",
-                "description": "Whether the Roomba should stop moving and hold still right now. This is a genuine decision the Roomba makes for itself, not a mechanical reflex - it can be true because the therapist asked it to stop, because of something that just happened (like a collision), or simply because the Roomba wants to, on its own. A resistant or defiant Roomba might not stop even when asked. Set false otherwise, including when the Roomba is refusing or resisting a request to stop."
+            # Replaces the old should_pause boolean (2026-09-18 -
+            # Pause_Redesign_Implementation_Plan.md). That field had to be
+            # actively re-asserted or re-negated every single turn to mean
+            # anything, which implicitly asked the model to track a state
+            # machine it never actually controlled half of (there was no
+            # real resume signal at all). This field asks for the opposite:
+            # say nothing on the overwhelming majority of turns, and only
+            # speak up at the moment you're actually changing something.
+            "pause_directive": {
+                "type": "string",
+                "enum": ["pause", "resume", "freeze", "stop"],
+                "description": (
+                    "Only include this field when you are making a deliberate, "
+                    "conscious decision to change whether the Roomba is currently "
+                    "moving. 'pause' means stop and hold still right now - because "
+                    "the therapist asked, because of something that just happened, "
+                    "or simply because you want to. 'resume' means start moving "
+                    "again, for the same range of reasons. Omit this field entirely "
+                    "on every turn where you are not making that decision right now "
+                    "- you do not need to track or restate whether the Roomba is "
+                    "already paused or already moving; simply act when you decide "
+                    "to change it, and say nothing about it otherwise. A resistant "
+                    "or defiant Roomba might not pause even when asked, and is not "
+                    "obligated to resume just because time has passed or the "
+                    "conversation has moved on - resuming, like pausing, has to be "
+                    "an actual choice you're making.\n\n"
+                    "This same field also carries two further decisions, each "
+                    "distinct from pause/resume and from each other. 'freeze' "
+                    "means you've decided this moment calls for a real stop - not "
+                    "a pause, but a chance to genuinely talk through what just "
+                    "happened - often because the therapist suggests it, though "
+                    "it's still your choice to make. A freeze cannot be undone by "
+                    "'resume' or anything else - the only way out of one is a "
+                    "later 'stop' - so choose it deliberately, not as a routine "
+                    "reaction. 'stop' means you've decided to end the session "
+                    "entirely, right now; it can happen at any time, whether or "
+                    "not you froze first, and like freeze, it can be something "
+                    "the therapist asks for, but you're the one deciding whether "
+                    "to actually do it."
+                )
             },
             "entity_sensitivities": {
                 "type": "array",
@@ -179,10 +233,55 @@ ROOMBA_STATE_TOOL = {
                 },
                 "required": ["target_name", "direction", "percent"]
             }
-        },
-        "required": ["dialog", "pad", "should_pause"]
-    }
 }
+
+# Only present when DEBUG_LLM_REASONING is on (see that constant's own
+# comment above) - deliberately not length-constrained the way dialog is;
+# Steve's framing was "as detailed as necessary for the LLM to explain how
+# it made up its mind."
+_REASONING_PROPERTY = {
+    "type": "string",
+    "description": (
+        "Only present because you're being asked to explain your own "
+        "decision-making for debugging purposes - this has no bearing on "
+        "the Roomba's character or the therapist's experience, and is "
+        "never shown to the therapist. Explain, in plain terms, how you "
+        "arrived at everything else in this response: which specific "
+        "pieces of information you were given (the system prompt's "
+        "guidance, your current PAD state, your entity sensitivities, the "
+        "roster, prior conversation) mattered most to your dialog/pad/"
+        "pause_directive/entity_sensitivities/movement_directive decisions "
+        "this turn, and which pieces of information you were given turned "
+        "out to be irrelevant or went unused. Be as detailed as you need "
+        "to be - unlike dialog, there is no length limit here."
+    )
+}
+
+
+def build_roomba_state_tool():
+    """
+    Builds the report_roomba_state tool schema fresh on every call rather
+    than once at module load, so DEBUG_LLM_REASONING can be read at call
+    time (tests flip it via monkeypatch/env without needing to reimport
+    this module) and so the `reasoning` property genuinely never reaches
+    Anthropic - not just unused - when the toggle is off.
+    """
+    properties = dict(_ROOMBA_STATE_TOOL_BASE_PROPERTIES)
+    required = ["dialog", "pad"]
+
+    if DEBUG_LLM_REASONING:
+        properties["reasoning"] = _REASONING_PROPERTY
+        required.append("reasoning")
+
+    return {
+        "name": "report_roomba_state",
+        "description": "Report the Roomba's spoken line, updated emotional state, any deliberate pause/resume decision, and any entity sensitivity changes for this turn.",
+        "input_schema": {
+            "type": "object",
+            "properties": properties,
+            "required": required
+        }
+    }
 
 
 def build_current_state_context(pad, entity_sensitivities, known_entity_roster=None):
@@ -222,10 +321,12 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         + "\n\n" + build_current_state_context(current_pad, current_entity_sensitivities, known_entity_roster)
     )
 
+    logger.debug(f"\nLLM call - full system prompt:\n {full_system_prompt!r}\n\n")
+
     outgoing_turn = conversation_history[-1] if conversation_history else None
     logger.debug(f"LLM call - sending: {outgoing_turn!r}")
     logger.debug(f"LLM call - sending current_pad: {current_pad!r}")
-    logger.debug(f"LLM call - sending current_entity_sensitivities: {current_entity_sensitivities!r}")
+    logger.debug(f"LLM call - sending current_entity_sensitivities: {current_entity_sensitivities!r}\n\n")
     # Added 2026-09-13: the roster is the ONLY thing that determines which
     # target_name values are even choosable for a movement_directive this
     # turn (see build_current_state_context / ROOMBA_STATE_TOOL), but
@@ -235,7 +336,8 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
     # what it was actually offered - e.g. whether the entity currently
     # colliding was even present, and where it ranked (list_entries sorts
     # most-recently-encountered first).
-    logger.debug(f"LLM call - roster offered: {known_entity_roster!r}")
+
+    # logger.debug(f"LLM call - roster offered: {known_entity_roster!r}")
 
     try:
         message = client.messages.create(
@@ -243,7 +345,7 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
             max_tokens=1024,
             system=full_system_prompt,
             messages=conversation_history,
-            tools=[ROOMBA_STATE_TOOL],
+            tools=[build_roomba_state_tool()],
             tool_choice={"type": "tool", "name": "report_roomba_state"}
         )
     except anthropic.APIError as e:
@@ -259,10 +361,14 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         logger.warning(f"No tool_use block in LLM response, raw content: {message.content!r}")
         dialog = "..."
         pad = PADState(pleasure=0.0, arousal=0.0, dominance=0.0)
-        return dialog, pad, [], False, None
+        # No LLM turn actually happened, so there's no opinion to report -
+        # None (not "false") is the correct default now that pause_directive
+        # is a genuine tri-state (see models.py's TherapyMessageResponse).
+        return dialog, pad, [], None, None, None
 
+    logger.debug(f"LLM call - response - tool_use_block {tool_use_block}\n\n")
     response_data = tool_use_block.input
-    logger.debug(f"LLM call - received tool input {response_data!r}")
+    logger.debug(f"LLM call - received tool input {response_data!r}\n\n")
 
     try:
         dialog = response_data['dialog']
@@ -271,9 +377,17 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         logger.warning(f"Tool input missing dialog/pad despite schema, raw: {response_data!r} ({e})")
         dialog = "..."
         pad = PADState(pleasure=0.0, arousal=0.0, dominance=0.0)
-        return dialog, pad, [], False, None
+        return dialog, pad, [], None, None, None
 
-    should_pause = response_data.get('should_pause', False)
+    # None if omitted (the normal case on most turns) or if the model
+    # returned something outside the schema's enum despite tool-use
+    # constraints not being a hard guarantee of actual output - see the
+    # movement_directive percent-clamping comment below for the same
+    # "don't trust the schema alone" reasoning.
+    pause_directive = response_data.get('pause_directive')
+    if pause_directive not in (None, "pause", "resume", "freeze", "stop"):
+        logger.warning(f"pause_directive had an unexpected value, ignoring: {pause_directive!r}")
+        pause_directive = None
 
     try:
         entity_sensitivity_updates = [
@@ -318,4 +432,11 @@ def call_llm(system_prompt, conversation_history, current_pad, current_entity_se
         except (KeyError, TypeError, ValueError) as e:
             logger.warning(f"movement_directive parse failed, raw: {raw!r} ({e})")
 
-    return dialog, pad, entity_sensitivity_updates, should_pause, raw_movement_directive
+    # Only ever non-None when DEBUG_LLM_REASONING is on - the property isn't
+    # in the schema otherwise, so response_data.get() finds nothing to read.
+    # No defensive type-check beyond .get() needed: the schema constrains it
+    # to a string, and an unexpected non-string here would just be passed
+    # through to story_log.render_reasoning(), which only checks truthiness.
+    reasoning = response_data.get('reasoning')
+
+    return dialog, pad, entity_sensitivity_updates, pause_directive, raw_movement_directive, reasoning

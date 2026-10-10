@@ -6,7 +6,7 @@ agreed in Movement_Concurrency_Plan.md, section 4, item 2.
 
 Plain assert-based script, consistent with test_event_aggregation.py and
 this project's existing Swagger-manual-testing-by-choice practice
-(BACKLOG.md #13) - no pytest dependency introduced.
+(per the JIRA backlog) - no pytest dependency introduced.
 """
 
 import json
